@@ -241,6 +241,7 @@ peers = ["192.168.1.10:6881"]
 # reset_token = "<long random string>"     # see "Resetting a server"
 # wait_for_reset = false                    # single use: stay up for resets
 
+# Notifiers get the ticket only; include_key = true also sends the decryption key.
 [[serve.notify]]
 type = "discord"
 url = "https://discord.com/api/webhooks/<id>/<token>"
@@ -248,6 +249,7 @@ url = "https://discord.com/api/webhooks/<id>/<token>"
 [[serve.notify]]
 type = "webhook"
 url = "https://example.com/hooks/deaddrop"
+include_key = true                # this one also gets the key (default: false)
 
 [fetch]
 out = "/home/me/Downloads"
