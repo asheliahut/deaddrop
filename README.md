@@ -1,12 +1,90 @@
-# deaddrop
+<div align="center">
 
-A server downloads a torrent without seeding it, then hands the files to a
-client over [iroh](https://iroh.computer) (peer-to-peer QUIC with NAT
-traversal and relay fallback).
+# 📦 deaddrop
 
+**Leech a torrent on a server. Encrypt it. Hand it to one client, peer to peer. Leave nothing behind.**
+
+🌐 **[deaddrop.rip](https://deaddrop.rip)**
+
+[![CI](https://github.com/asheliahut/deaddrop/actions/workflows/ci.yml/badge.svg)](https://github.com/asheliahut/deaddrop/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/asheliahut/deaddrop?include_prereleases&sort=semver&logo=github)](https://github.com/asheliahut/deaddrop/releases)
+[![GitHub stars](https://img.shields.io/github/stars/asheliahut/deaddrop?style=flat&logo=github)](https://github.com/asheliahut/deaddrop/stargazers)
+[![Rust 2024](https://img.shields.io/badge/rust-2024_edition-orange?logo=rust)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+[![Platforms](https://img.shields.io/badge/platforms-linux%20%7C%20macOS%20%7C%20windows-blue)](#-installation)
+[![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue)](LICENSE)
+[![Website](https://img.shields.io/badge/website-deaddrop.rip-111827)](https://deaddrop.rip)
+[![Powered by iroh](https://img.shields.io/badge/powered_by-iroh-7c3aed)](https://iroh.computer)
+[![Encrypted with age](https://img.shields.io/badge/encrypted_with-age-0f766e)](https://age-encryption.org)
+
+[Website](https://deaddrop.rip) •
+[Quick start](#-quick-start) •
+[Installation](#-installation) •
+[Usage](#usage) •
+[Config](#config-file) •
+[Notifications](#notifications) •
+[Encryption](#encryption) •
+[Contributing](#-contributing)
+
+</div>
+
+---
+
+A server downloads a torrent **without seeding it**, encrypts the result, then
+hands the files to a client over [iroh](https://iroh.computer) (peer-to-peer
+QUIC with NAT traversal and relay fallback).
+
+```mermaid
+flowchart LR
+    swarm[("🌐 BitTorrent<br/>swarm")]
+    server["🖥️ deaddrop serve<br/><sub>age-encrypts, deletes plaintext</sub>"]
+    client["💻 deaddrop fetch<br/><sub>verifies + decrypts</sub>"]
+    swarm -- "leech only<br/>(never uploads)" --> server
+    server -- "iroh-blobs<br/>QUIC · BLAKE3-verified · ciphertext" --> client
 ```
-                 BitTorrent (leech only)            iroh-blobs (QUIC, verified)
-  swarm  ───────────────────────────────▶  server  ─────────────────────────────▶  client
+
+## ✨ Features
+
+- 🚫 **Zero seeding** – built on librqbit's `disable-upload`, no incoming BitTorrent listener, and the swarm session is torn down before serving starts.
+- 🔐 **End-to-end encrypted** – every file is [age](https://age-encryption.org)-encrypted with a fresh per-torrent key that never touches the server's disk. File names are hidden too.
+- 🕳️ **NAT-proof transfers** – iroh punches through NATs and falls back to relays, so neither side needs an open port.
+- ✅ **Verified delivery** – every chunk is checked against its BLAKE3 hash; tampering or a wrong key fails loudly.
+- 💥 **Single use by default** – one client, one download, then the server shuts down (or wipes the data and waits).
+- 🔄 **Hot swaps** – point a running server at a new torrent with `deaddrop reset`; the old ticket dies.
+- 🔔 **Notifications** – push tickets to Discord or any webhook, with per-notifier control over who gets the key.
+- 🧩 **Script friendly** – `<ticket> <key>` on stdout, everything else on stderr, TOML config, shell completions.
+
+## 🚀 Quick start
+
+```sh
+# on the server
+deaddrop serve 'magnet:?xt=urn:btih:...'
+# ...prints:  <ticket> AGE-SECRET-KEY-1...
+
+# on the client
+DEADDROP_KEY=AGE-SECRET-KEY-1... deaddrop fetch <ticket> -o ./downloads
+```
+
+That's it. The server exits once the client has everything.
+
+## 📥 Installation
+
+**Prebuilt binaries** for Linux (gnu + musl, x86_64 + aarch64), macOS (Intel +
+Apple Silicon) and Windows (x86_64 + ARM) are attached to every
+[GitHub release](https://github.com/asheliahut/deaddrop/releases), with
+`SHA256SUMS`.
+
+```sh
+# example: Linux x86_64 (static musl build)
+VERSION=v0.1.0
+curl -LO "https://github.com/asheliahut/deaddrop/releases/download/$VERSION/deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+tar -xzf "deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+sudo install "deaddrop-$VERSION-x86_64-unknown-linux-musl/deaddrop" /usr/local/bin/
+```
+
+**From source** (needs a recent stable Rust toolchain):
+
+```sh
+cargo install --locked --git https://github.com/asheliahut/deaddrop
 ```
 
 ## Usage
@@ -306,3 +384,54 @@ cargo run --example seed -- ./some-dir       # prints magnet + peer address, wri
 cargo run -- serve ./some-dir.torrent --peer 127.0.0.1:<port>
 DEADDROP_KEY=<key> cargo run -- fetch <ticket> -o /tmp/out
 ```
+
+## 🤝 Contributing
+
+Issues and pull requests are welcome! Before opening a PR, make sure CI will be happy:
+
+```sh
+cargo fmt --all
+cargo clippy --all-targets --locked -- -D warnings
+cargo test --locked
+```
+
+Want a new notifier? See [Adding a notifier](#adding-a-notifier). It's about
+two files of work.
+
+### Contributors
+
+<a href="https://github.com/asheliahut/deaddrop/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=asheliahut/deaddrop" alt="Contributors" />
+</a>
+
+## 🙏 Built on
+
+- [iroh](https://iroh.computer) and [iroh-blobs](https://github.com/n0-computer/iroh-blobs): P2P QUIC transport and verified blob transfer
+- [librqbit](https://github.com/ikatson/rqbit): the BitTorrent engine
+- [age](https://github.com/str4d/rage): file encryption
+- [clap](https://github.com/clap-rs/clap), [tokio](https://tokio.rs), and the rest of the Rust ecosystem
+
+## 📜 License
+
+deaddrop is free and unencumbered software released into the public domain.
+See [LICENSE](LICENSE) or <https://unlicense.org>.
+
+## ⭐ Star history
+
+<a href="https://star-history.com/#asheliahut/deaddrop&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=asheliahut/deaddrop&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=asheliahut/deaddrop&type=Date" />
+    <img alt="Star history chart" src="https://api.star-history.com/svg?repos=asheliahut/deaddrop&type=Date" />
+  </picture>
+</a>
+
+---
+
+<div align="center">
+
+If deaddrop is useful to you, consider giving it a ⭐. It helps other people find it.
+
+<sub>Use it responsibly: only download and share content you have the right to.</sub>
+
+</div>

@@ -2,6 +2,9 @@
 name = "deaddrop"
 version = "0.1.0"
 edition = "2024"
+license = "Unlicense"
+homepage = "https://deaddrop.rip"
+repository = "https://github.com/asheliahut/deaddrop"
 
 [dependencies]
 age = "0.11"
