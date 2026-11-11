@@ -5,13 +5,19 @@ taken seriously. Thank you for helping keep it safe.
 
 ## Supported versions
 
-deaddrop is pre-1.0. Only the latest release gets security fixes.
+deaddrop follows [semantic versioning](https://semver.org). Security fixes
+land in the latest release of the current major version (`vX`); there are no
+backports to older minor or patch releases, so upgrade to the newest `vX.Y.Z`
+to pick up a fix.
 
 | Version | Supported |
 | --- | --- |
-| Latest release | ✅ |
-| Older releases | ❌ |
+| Latest `vX.Y.Z` (current major) | ✅ |
+| Older `vX.Y.Z` releases in the current major | ❌ (upgrade to the latest) |
+| Previous major versions (`vX-1` and earlier) | ❌ |
 | `main` | ✅ (best effort) |
+
+When a new major version ships, the previous major stops receiving fixes.
 
 ## Reporting a vulnerability
 
@@ -102,3 +108,5 @@ exploitable, or ships a version with a known advisory, report it here.
 - Use a long random reset token, e.g. `openssl rand -hex 32`.
 - Only give `include_key` to notifiers you trust with the data.
 - Verify release downloads against `SHA256SUMS`.
+- Installed with Homebrew? Run `brew upgrade deaddrop` to pick up security
+  releases.
