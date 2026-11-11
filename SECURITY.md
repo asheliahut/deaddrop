@@ -1,0 +1,104 @@
+# Security Policy
+
+deaddrop moves data that people want kept private, so security reports are
+taken seriously. Thank you for helping keep it safe.
+
+## Supported versions
+
+deaddrop is pre-1.0. Only the latest release gets security fixes.
+
+| Version | Supported |
+| --- | --- |
+| Latest release | ✅ |
+| Older releases | ❌ |
+| `main` | ✅ (best effort) |
+
+## Reporting a vulnerability
+
+**Please do not open a public issue, discussion or pull request for a
+security problem.**
+
+Report it privately through GitHub's
+[private vulnerability reporting](https://github.com/asheliahut/deaddrop/security/advisories/new)
+(the **Security** tab → **Report a vulnerability**).
+
+Please include, as far as you can:
+
+- The deaddrop version (`deaddrop --version`) or commit, and your platform.
+- Which command and options are involved (`serve`, `fetch`, `reset`,
+  notifiers, config file).
+- What an attacker needs (the ticket, the key, network position, a reset
+  token, local access to the server, ...) and what they gain.
+- Steps to reproduce, or a proof of concept.
+
+Leave real tickets, keys, reset tokens and webhook URLs out of the report, or
+rotate them first.
+
+## What to expect
+
+deaddrop is maintained by volunteers, so these are goals rather than
+guarantees:
+
+- An acknowledgement within **7 days**.
+- A first assessment (accepted, needs more info, or out of scope) within
+  **14 days**.
+- For accepted reports, a fix and a release as soon as practical, followed by
+  a published GitHub security advisory. You'll be credited in the advisory
+  unless you'd rather not be.
+
+Please give us a reasonable chance to ship a fix before disclosing publicly.
+If 90 days pass without a fix, or without an agreed timeline, you're free to
+disclose.
+
+## Scope
+
+In scope are problems in deaddrop's own code that break what it promises.
+For example:
+
+- **Confidentiality:** recovering plaintext file contents, file names or the
+  torrent name without the key; the decryption key being written to the
+  server's disk or leaked to a notifier that doesn't have `include_key`.
+- **Integrity:** `fetch` accepting tampered or wrong-key data, or writing a
+  partial file under its real name.
+- **Client file system:** a malicious server making `fetch` write outside the
+  output directory (path traversal, absolute paths, symlinks, ...).
+- **Seeding:** deaddrop uploading torrent piece data to the swarm, or
+  accepting incoming BitTorrent connections.
+- **Single use:** a second client downloading from a single-use server, or an
+  old ticket still serving data after a reset.
+- **Reset protocol:** resetting a server without the right token, bypassing
+  the wrong-token delay, or a reset source being read as a path on the
+  server's disk.
+- **Secrets in output:** webhook URLs or reset tokens showing up in logs,
+  `deaddrop config check` or error messages.
+- Crashes or resource exhaustion that a remote peer can trigger cheaply.
+
+### Out of scope
+
+These are known limits, documented in the [README](README.md#encryption):
+
+- File sizes, file count, and the fact that a transfer happened are not
+  hidden.
+- Plaintext exists on the server's disk while the torrent downloads, and
+  deletion is not secure erasure (especially on SSDs).
+- The key appears on the server's stderr/stdout, so a persistent log of that
+  output (systemd journal, log files) contains it.
+- Anyone holding the ticket can download the ciphertext; anyone holding both
+  the ticket and the key can read it.
+- The BitTorrent swarm, trackers and DHT can see the server's IP address
+  while it leeches.
+- Content legality, or what users choose to share.
+
+Bugs in dependencies (iroh, iroh-blobs, librqbit, age/rage, ...) should go to
+those projects. If deaddrop uses a dependency in a way that makes it
+exploitable, or ships a version with a known advisory, report it here.
+
+## Hardening tips for users
+
+- Send the ticket and the key over different channels.
+- Prefer the config file (`chmod 600`) or environment variables over
+  command-line flags for webhook URLs and reset tokens, to keep them out of
+  shell history and `ps`.
+- Use a long random reset token, e.g. `openssl rand -hex 32`.
+- Only give `include_key` to notifiers you trust with the data.
+- Verify release downloads against `SHA256SUMS`.
