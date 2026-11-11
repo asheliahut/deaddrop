@@ -22,10 +22,12 @@ use crate::notify::NotifierConfig;
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// Log filter, same syntax as RUST_LOG (e.g. "info", "deaddrop=debug").
+    /// Log filter, same syntax as RUST_LOG (e.g. "off", "info", "deaddrop=debug").
+    /// Defaults to "off" in release builds and "warn" in debug builds.
     pub log: Option<String>,
     pub serve: ServeConfig,
     pub fetch: FetchConfig,
+    pub reset: ResetConfig,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -36,12 +38,23 @@ pub struct ServeConfig {
     pub data_dir: Option<PathBuf>,
     pub peers: Vec<SocketAddr>,
     pub notify: Vec<NotifierConfig>,
+    /// Lets `deaddrop reset` replace the torrent.
+    pub reset_token: Option<String>,
+    /// Single use: after the download, delete the data and wait for a reset.
+    pub wait_for_reset: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FetchConfig {
     pub out: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ResetConfig {
+    /// The server's reset token, used by `deaddrop reset`.
+    pub token: Option<String>,
 }
 
 /// The default config file location for this platform, if one can be found.
@@ -100,18 +113,22 @@ fn parse(text: &str) -> Result<Config> {
     toml::from_str(text).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Webhook URLs are secrets; tell the user if other users can read them.
+/// Webhook URLs and reset tokens are secrets; tell the user if other users
+/// can read them.
 #[cfg(unix)]
 fn warn_if_world_readable(path: &Path, config: &Config) {
     use std::os::unix::fs::PermissionsExt;
-    if config.serve.notify.is_empty() {
+    let secrets = !config.serve.notify.is_empty()
+        || config.serve.reset_token.is_some()
+        || config.reset.token.is_some();
+    if !secrets {
         return;
     }
     if let Ok(meta) = std::fs::metadata(path)
         && meta.permissions().mode() & 0o077 != 0
     {
         eprintln!(
-            "warning: {} contains webhook URLs but can be read by other users; consider `chmod 600 {}`",
+            "warning: {} contains secrets (webhook URLs or reset tokens) but can be read by other users; consider `chmod 600 {}`",
             path.display(),
             path.display()
         );

@@ -4,9 +4,11 @@
 mod cli;
 mod client;
 mod config;
+mod crypt;
+mod gate;
 mod notify;
+mod reset;
 mod server;
-mod single_use;
 mod torrent;
 
 use anyhow::{Context, Result};
@@ -16,6 +18,14 @@ use tracing_subscriber::EnvFilter;
 use crate::{
     cli::{Cli, Command, ConfigAction},
     notify::{NotifierConfig, Notifiers},
+};
+
+/// Log filter used when neither RUST_LOG nor the config file sets one:
+/// nothing at all in release builds, warnings in debug builds.
+const DEFAULT_LOG: &str = if cfg!(debug_assertions) {
+    "warn"
+} else {
+    "off"
 };
 
 #[tokio::main]
@@ -32,11 +42,11 @@ async fn main() -> Result<()> {
 
     let (config, _) = config::load(cli.config.as_deref())?;
 
-    // RUST_LOG > config `log` > "warn".
+    // RUST_LOG > config `log` > DEFAULT_LOG.
     let filter = match EnvFilter::try_from_default_env() {
         Ok(f) => f,
         Err(_) => {
-            let level = config.log.as_deref().unwrap_or("warn");
+            let level = config.log.as_deref().unwrap_or(DEFAULT_LOG);
             EnvFilter::try_new(level).with_context(|| format!("invalid log filter {level:?}"))?
         }
     };
@@ -52,6 +62,8 @@ async fn main() -> Result<()> {
             data_dir,
             peers,
             notify,
+            reset_token,
+            wait_for_reset,
         } => {
             let file = config.serve;
             // Flags and DEADDROP_NOTIFY arrive here together (clap handles
@@ -62,17 +74,35 @@ async fn main() -> Result<()> {
                 parse_notify_flags(&notify)?
             };
             server::run(server::ServeOptions {
-                source,
+                source: torrent::Source::from_arg(&source)?,
                 single_use: !multi_use.or(file.multi_use).unwrap_or(false),
                 data_dir: data_dir.or(file.data_dir),
                 peers: if peers.is_empty() { file.peers } else { peers },
                 notify,
+                reset_token: reset_token.filter(|t| !t.is_empty()).or(file.reset_token),
+                wait_for_reset: wait_for_reset.or(file.wait_for_reset).unwrap_or(false),
             })
             .await
         }
-        Command::Fetch { ticket, out } => {
+        Command::Reset {
+            ticket,
+            source,
+            token,
+            no_wait,
+        } => {
+            let token = token.filter(|t| !t.is_empty()).or(config.reset.token).context(
+                "no reset token: pass --token, set DEADDROP_RESET_TOKEN, or set reset.token in the config file",
+            )?;
+            reset::request(ticket, torrent::Source::from_arg(&source)?, token, !no_wait).await
+        }
+        Command::Fetch { ticket, out, key } => {
+            let key = key.filter(|k| !k.is_empty()).context(
+                "the data is encrypted: pass the decryption key from `deaddrop serve` \
+                 in DEADDROP_KEY or with --key",
+            )?;
+            let key = crypt::Key::parse(&key)?;
             let out = out.or(config.fetch.out).unwrap_or_else(|| ".".into());
-            client::run(ticket, out).await
+            client::run(ticket, out, key).await
         }
         Command::Config { .. } | Command::Completions { .. } => unreachable!("handled above"),
     }
@@ -124,20 +154,28 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
                 EnvFilter::try_new(level)
                     .with_context(|| format!("invalid log filter {level:?}"))?;
             }
+            for (key, token) in [
+                ("serve.reset_token", &c.serve.reset_token),
+                ("reset.token", &c.reset.token),
+            ] {
+                if let Some(t) = token {
+                    reset::check_token(t).with_context(|| format!("invalid {key}"))?;
+                }
+            }
             // Build the notifiers too, which checks their URLs.
             let notifiers = Notifiers::new(&c.serve.notify)?;
             let or_default =
                 |v: Option<String>, d: &str| v.unwrap_or_else(|| format!("{d} (default)"));
             writeln!(o, "{} is valid\n", path.display())?;
-            writeln!(o, "log               {}", or_default(c.log, "warn"))?;
+            writeln!(o, "log                  {}", or_default(c.log, DEFAULT_LOG))?;
             writeln!(
                 o,
-                "serve.multi_use   {}",
+                "serve.multi_use      {}",
                 or_default(c.serve.multi_use.map(|b| b.to_string()), "false")
             )?;
             writeln!(
                 o,
-                "serve.data_dir    {}",
+                "serve.data_dir       {}",
                 or_default(
                     c.serve.data_dir.map(|d| d.display().to_string()),
                     "temp dir, deleted on exit"
@@ -146,7 +184,7 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
             let peers: Vec<String> = c.serve.peers.iter().map(|p| p.to_string()).collect();
             writeln!(
                 o,
-                "serve.peers       {}",
+                "serve.peers          {}",
                 if peers.is_empty() {
                     "none".into()
                 } else {
@@ -156,18 +194,32 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
             let labels = notifiers.labels();
             writeln!(
                 o,
-                "serve.notify      {}",
+                "serve.notify         {}",
                 if labels.is_empty() {
                     "none".into()
                 } else {
                     format!("{} (URLs hidden)", labels.join(", "))
                 }
             )?;
+            let set = |v: &Option<String>| {
+                if v.is_some() {
+                    "set (hidden)"
+                } else {
+                    "not set"
+                }
+            };
+            writeln!(o, "serve.reset_token    {}", set(&c.serve.reset_token))?;
             writeln!(
                 o,
-                "fetch.out         {}",
+                "serve.wait_for_reset {}",
+                or_default(c.serve.wait_for_reset.map(|b| b.to_string()), "false")
+            )?;
+            writeln!(
+                o,
+                "fetch.out            {}",
                 or_default(c.fetch.out.map(|d| d.display().to_string()), ".")
             )?;
+            writeln!(o, "reset.token          {}", set(&c.reset.token))?;
         }
     }
     write_stdout(&o)
@@ -178,6 +230,20 @@ fn completions(shell: clap_complete::Shell) -> Result<()> {
     let mut buf = Vec::new();
     clap_complete::generate(shell, &mut Cli::command(), "deaddrop", &mut buf);
     write_stdout(&String::from_utf8(buf)?)
+}
+
+/// Show a ticket and its decryption key: readable on stderr, and as one
+/// `<ticket> <key>` line on stdout for scripts.
+pub fn print_ticket(ticket: &str, key: &str) -> Result<()> {
+    eprintln!("on the client, run:");
+    eprintln!();
+    eprintln!("    deaddrop fetch {ticket}");
+    eprintln!();
+    eprintln!("with this decryption key in DEADDROP_KEY (or --key):");
+    eprintln!();
+    eprintln!("    {key}");
+    eprintln!();
+    write_stdout(&format!("{ticket} {key}\n"))
 }
 
 /// Write to stdout, treating a closed pipe (`deaddrop ... | head`) as success

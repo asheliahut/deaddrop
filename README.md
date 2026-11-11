@@ -17,25 +17,94 @@ On the server:
 deaddrop serve 'magnet:?xt=urn:btih:...'          # single use: exits after one client finishes downloading
 deaddrop serve https://example.com/x.torrent      # .torrent URLs and local .torrent paths work too
 deaddrop serve file.torrent --multi-use           # keep serving to any number of clients until Ctrl-C
+deaddrop serve file.torrent --wait-for-reset      # one download per torrent, then wait for the next (needs a reset token)
 ```
 
-When the torrent finishes, the server prints a ticket. On the client:
+When the torrent finishes, the server encrypts it, deletes the plaintext, and
+prints a ticket and a decryption key. On the client:
 
 ```sh
+export DEADDROP_KEY=AGE-SECRET-KEY-1...           # the key from `serve`
 deaddrop fetch <ticket> -o ./downloads
 ```
+
+See [Encryption](#encryption) for what is protected and from whom.
 
 ### `serve` options
 
 | Flag | Meaning |
 | --- | --- |
-| `--multi-use` | Keep serving to any number of clients until Ctrl-C. Without this flag the server is **single use**: it serves one client, then shuts down once that client has the whole collection and disconnects (or 30 s after the transfer completes). While that client is connected, other clients are rejected. If the client drops out before finishing, the next client can connect. `--multi-use=false` forces single use even if the config file turns multi-use on. |
+| `--multi-use` | Keep serving to any number of clients until Ctrl-C. Without this flag the server is **single use**: it serves one client, then shuts down (or, with `--wait-for-reset`, deletes the data and waits) once that client has the whole collection and disconnects (or 30 s after the transfer completes). While that client is connected, other clients are rejected. If the client drops out before finishing, the next client can connect. `--multi-use=false` forces single use even if the config file turns multi-use on. |
 | `--data-dir <DIR>` | Keep the torrent data and blob store here. If you leave this out, deaddrop uses a temp directory and deletes it on exit. |
 | `--peer <IP:PORT>` | Extra BitTorrent peer to connect to. Repeatable. Useful for private swarms. |
 | `--notify <TYPE=URL>` | Send the ticket somewhere when it's ready. Repeatable. See [Notifications](#notifications). |
+| `--reset-token <TOKEN>` | Let `deaddrop reset` switch the server to a different torrent. See [Resetting a server](#resetting-a-server). Prefer `DEADDROP_RESET_TOKEN` or the config file. |
+| `--wait-for-reset` | Single use, needs a reset token: after the one download, delete the data and keep running until a reset brings the next torrent. See [Single use, long running](#single-use-long-running). |
 | `-c, --config <FILE>` | TOML config file (works with every command). See [Config file](#config-file). |
 
 `fetch` takes `-o/--out <DIR>` (default: the current directory).
+
+### Resetting a server
+
+A server started with a reset token can be told to serve a different
+torrent, without restarting it:
+
+```sh
+# server
+export DEADDROP_RESET_TOKEN=$(openssl rand -hex 32)
+deaddrop serve first.torrent --multi-use
+
+# anywhere that has the ticket and the token
+export DEADDROP_RESET_TOKEN=<same token>
+deaddrop reset <ticket> 'magnet:?xt=urn:btih:...'   # or an http(s) .torrent URL, or a local .torrent file
+```
+
+- The source can be a magnet URI, an http(s) URL (the server fetches it), or
+  a local `.torrent` file (its contents are sent to the server). The server
+  never treats a reset source as a path on its own disk.
+- The server keeps serving the current torrent while the new one downloads.
+  If the download fails, nothing changes and `reset` reports the error.
+- Once the new torrent is ready, the server prints the new ticket and its new
+  decryption key (another line on stdout), sends them to the notifiers with
+  `"reset": true`, and `deaddrop reset` prints them too. `--no-wait` returns as soon as the server
+  accepts the request.
+- **The old ticket stops working.** Transfers already in progress finish, then
+  the old torrent's files are deleted, also from a `--data-dir`.
+- One reset at a time; a second request is refused while one is downloading.
+- Resets use their own iroh protocol (`deaddrop/reset/0`) on the same
+  endpoint, which is only enabled when a token is set. The token must be at
+  least 16 characters. A wrong token is refused after a short delay.
+- Any ticket the server handed out works for `reset`, even one that no
+  longer downloads anything: only its endpoint address is used.
+- The `reset` command reads its token from `--token`, `DEADDROP_RESET_TOKEN`,
+  or `[reset] token` in the config file.
+- A single-use server allows one download of each torrent it switches to.
+  Without `--wait-for-reset` it still exits after that download.
+
+### Single use, long running
+
+`--wait-for-reset` turns a single-use server into a long-running dead drop
+where every torrent can be downloaded exactly once:
+
+```sh
+export DEADDROP_RESET_TOKEN=$(openssl rand -hex 32)
+deaddrop serve first.torrent --wait-for-reset
+
+DEADDROP_KEY=<key> deaddrop fetch <ticket>    # the one download
+deaddrop reset <ticket> 'magnet:?xt=...'      # any ticket from this server works
+DEADDROP_KEY=<new key> deaddrop fetch <new ticket>   # each torrent has its own key
+```
+
+1. The server serves the torrent to one client, as in normal single use.
+2. When that client has everything and disconnects (or 30 s after it has
+   everything), the ticket stops working and the torrent's files are deleted.
+   The blob store drops its copy within about 10 s. The server keeps running
+   but serves nothing.
+3. A reset downloads the next torrent and serves it once more, with a new
+   ticket. A reset can also replace a torrent nobody has downloaded yet.
+
+Nothing is deleted on Ctrl-C beyond what normal single use does: with
+`--data-dir`, a torrent that wasn't downloaded yet stays on disk.
 
 ### Shell completions
 
@@ -56,9 +125,20 @@ Re-run it after upgrading so new flags complete too.
 examples, environment variables, config precedence and exit codes. `-h` gives
 a shorter summary.
 
-The ticket goes to stdout and everything else goes to stderr, so
-`TICKET=$(deaddrop serve x.torrent)` works in scripts. Set `RUST_LOG=info` for
-more detail.
+Each ticket goes to stdout as one `<ticket> <key>` line, and everything else
+goes to stderr. So `deaddrop serve x.torrent > tickets.txt` and then
+`read -r TICKET KEY < tickets.txt` works in scripts. After a
+[reset](#resetting-a-server), the new ticket and key are printed as another
+line.
+
+### Logging
+
+Release builds (`cargo build --release`) log nothing by default. Debug builds
+log warnings. Set `RUST_LOG` (e.g. `RUST_LOG=info`) or `log` in the
+[config file](#config-file) to change that, or `off` to turn logging off in
+any build. This only covers the log output from deaddrop and its libraries.
+The status lines (progress, the ticket, reset messages) are always printed to
+stderr.
 
 ## Config file
 
@@ -74,12 +154,14 @@ deaddrop config check                                      # validate it and sho
 For example:
 
 ```toml
-log = "warn"                      # same syntax as RUST_LOG
+log = "off"                       # same syntax as RUST_LOG; "off" = no logs (the release default)
 
 [serve]
 multi_use = false
 data_dir = "/var/lib/deaddrop"
 peers = ["192.168.1.10:6881"]
+# reset_token = "<long random string>"     # see "Resetting a server"
+# wait_for_reset = false                    # single use: stay up for resets
 
 [[serve.notify]]
 type = "discord"
@@ -91,6 +173,9 @@ url = "https://example.com/hooks/deaddrop"
 
 [fetch]
 out = "/home/me/Downloads"
+
+[reset]
+# token = "<long random string>"           # used by `deaddrop reset`
 ```
 
 - **Where it's read from:** `--config <file>` or `DEADDROP_CONFIG`. Otherwise
@@ -106,7 +191,7 @@ out = "/home/me/Downloads"
   file's directory.
 - **Typos are errors:** unknown keys or notifier types fail at startup with
   the line and column.
-- The file holds secrets once it has webhook URLs. On Unix, deaddrop warns if
+- The file holds secrets once it has webhook URLs or reset tokens. On Unix, deaddrop warns if
   other users can read it (`chmod 600` fixes that).
 - The torrent source and the fetch ticket are per-run inputs, so they stay on
   the command line.
@@ -132,10 +217,17 @@ deaddrop serve x.torrent
 Sources aren't merged: `--notify` flags replace `DEADDROP_NOTIFY`, which
 replaces the config file's list.
 
+By default a notifier gets the ticket but **not the decryption key**. Choose
+per notifier which ones get the key: add `+key` to the type on the command
+line (`webhook+key=https://...`) or set `include_key = true` in its
+`[[serve.notify]]` table. For example, post the ticket to a Discord channel
+and send the key to a private webhook, so a leaked channel alone isn't
+enough to read the data.
+
 | Type | What it sends |
 | --- | --- |
-| `discord` | A channel message with the torrent name, size, mode and a copyable `deaddrop fetch …` command. Mentions are turned off and markdown in the name is escaped. |
-| `webhook` | `POST` with a JSON body: `{"event": "ticket_ready", "name", "ticket", "fetch_command", "files", "total_bytes", "single_use"}` |
+| `discord` | A channel message with the torrent name, size, mode and a copyable `deaddrop fetch …` command. Mentions are turned off and markdown in the name is escaped. With the key, it is shown as a spoiler, to be set as `DEADDROP_KEY`. |
+| `webhook` | `POST` with a JSON body: `{"event": "ticket_ready", "name", "ticket", "fetch_command", "files", "total_bytes", "single_use", "reset"}`, plus `"key"` for notifiers with the key. `reset` is `true` when the ticket replaces an old one after a reset. |
 
 Bad notifier settings are rejected at startup, before the torrent download begins. If a
 notification fails (an error status, unreachable host, or the 15 s timeout),
@@ -168,14 +260,41 @@ New kinds of events (e.g. "client finished downloading") are variants of the
   session (DHT, trackers, peer connections) is stopped before iroh starts
   serving.
 
+## Encryption
+
+The data is encrypted before iroh ever sees it, so it doesn't depend on
+trusting iroh's transport or relays:
+
+1. When the torrent finishes, each file is encrypted with
+   [age](https://age-encryption.org) to a new X25519 key made for that
+   torrent. Each plaintext file is deleted as soon as it is encrypted (so
+   you need about one extra file's worth of disk space), and the whole
+   download folder is deleted afterwards, also if encryption fails.
+2. Only the encrypted files go into the blob store and over iroh. Collection
+   entries are named `0`, `1`, ...; the real file names and the torrent name
+   are in an encrypted manifest (`deaddrop-manifest.age`).
+3. The key lives only in the server's memory. It is printed (stderr and
+   stdout) and sent to the notifiers that ask for it, never written to the
+   server's disk. Each reset gets a new key.
+4. `fetch` downloads the ciphertext, then decrypts each file into place. A
+   wrong key or tampered data fails (age authenticates every chunk), and no
+   partial file is left under the real name.
+
+What it doesn't hide: file sizes and file count, and that a transfer
+happened. The plaintext does exist on the server's disk while the torrent
+downloads, and deleting a file doesn't securely erase it (especially on
+SSDs). If the server's stderr goes to a persistent log (systemd journal, a
+log file), the key ends up there too.
+
 ## Notes
 
-- Files are imported into the iroh blob store by reference, not copied, so
-  disk usage isn't doubled.
+- Encrypted files are imported into the iroh blob store by reference, not
+  copied, so disk usage isn't doubled.
 - The client checks every received chunk against its BLAKE3 hash. It refuses
   file names that are absolute or contain `..`.
-- Anyone who has the ticket can download the data. Treat the ticket as a
-  secret.
+- Anyone who has the ticket can download the encrypted data; the key is
+  needed to read it. Treat both as secrets, and send them over different
+  channels when you can.
 
 ## Testing locally
 
@@ -185,5 +304,5 @@ the public swarm:
 ```sh
 cargo run --example seed -- ./some-dir       # prints magnet + peer address, writes ./some-dir.torrent
 cargo run -- serve ./some-dir.torrent --peer 127.0.0.1:<port>
-cargo run -- fetch <ticket> -o /tmp/out
+DEADDROP_KEY=<key> cargo run -- fetch <ticket> -o /tmp/out
 ```

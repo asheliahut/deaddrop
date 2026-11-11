@@ -9,7 +9,9 @@
 # This file may hold webhook URLs, which are secrets: chmod 600 it.
 
 # Log filter, same syntax as RUST_LOG. RUST_LOG overrides it.
-log = "warn"
+# "off" disables logging entirely. Default: "off" in release builds,
+# "warn" in debug builds.
+# log = "warn"
 
 [serve]
 # false (default): shut down after one client has downloaded the data.
@@ -23,8 +25,19 @@ multi_use = false
 # Extra BitTorrent peers to connect to.
 # peers = ["192.168.1.10:6881"]
 
+# Let `deaddrop reset` replace the torrent being served with a new magnet or
+# .torrent. Anyone with the ticket AND this token can do it. At least 16
+# characters; `openssl rand -hex 32` makes a good one. Unset (the default)
+# turns resets off. DEADDROP_RESET_TOKEN overrides it.
+# reset_token = "<long random string>"
+
+# Single use only, needs reset_token: instead of exiting after the one
+# download, delete the data and wait for a reset to bring the next torrent.
+# wait_for_reset = false
+
 # Notifiers, sent when the ticket is ready. Add as many as you like.
 # Any --notify flag or DEADDROP_NOTIFY replaces this whole list.
+# include_key = true also sends the decryption key (default: ticket only).
 [[serve.notify]]
 type = "discord"
 url = "https://discord.com/api/webhooks/<id>/<token>"
@@ -32,7 +45,13 @@ url = "https://discord.com/api/webhooks/<id>/<token>"
 [[serve.notify]]
 type = "webhook"
 url = "https://example.com/hooks/deaddrop"
+include_key = true
 
 [fetch]
 # Where `deaddrop fetch` writes files. Default: the current directory.
 # out = "/home/me/Downloads"
+
+[reset]
+# The server's reset token, used by `deaddrop reset`. --token and
+# DEADDROP_RESET_TOKEN override it.
+# token = "<long random string>"

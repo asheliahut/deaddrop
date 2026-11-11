@@ -11,6 +11,9 @@
 //!
 //! or with the `--notify <type>=<url>` shorthand on the command line.
 //!
+//! The decryption key is only sent to notifiers with `include_key = true`
+//! (shorthand: `<type>+key=<url>`). The others get the ticket alone.
+//!
 //! # Adding a new notifier
 //!
 //! 1. Create `src/notify/<type>.rs` with a type that implements [`Notifier`].
@@ -54,6 +57,24 @@ pub struct TicketReady {
     pub total_bytes: u64,
     /// True if the server shuts down after one download.
     pub single_use: bool,
+    /// True if this replaces an earlier ticket after a reset. The old ticket
+    /// no longer works.
+    pub reset: bool,
+    /// The decryption key. Only set for notifiers with `include_key`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+impl Event {
+    /// A copy of this event carrying the decryption key.
+    fn with_key(&self, key: &str) -> Self {
+        match self {
+            Self::TicketReady(t) => Self::TicketReady(TicketReady {
+                key: Some(key.to_string()),
+                ..t.clone()
+            }),
+        }
+    }
 }
 
 /// A destination for notifications.
@@ -74,9 +95,17 @@ pub trait Notifier: Send + Sync {
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub enum NotifierConfig {
     /// Discord channel webhook.
-    Discord { url: String },
+    Discord {
+        url: String,
+        #[serde(default)]
+        include_key: bool,
+    },
     /// Generic JSON webhook.
-    Webhook { url: String },
+    Webhook {
+        url: String,
+        #[serde(default)]
+        include_key: bool,
+    },
 }
 
 // Hand-written so secrets (webhook URLs) never show up in debug output.
@@ -86,34 +115,55 @@ impl std::fmt::Debug for NotifierConfig {
             Self::Discord { .. } => "discord",
             Self::Webhook { .. } => "webhook",
         };
-        write!(f, "NotifierConfig({kind}, <redacted>)")
+        let key = if self.include_key() { ", with key" } else { "" };
+        write!(f, "NotifierConfig({kind}{key}, <redacted>)")
     }
 }
 
 impl NotifierConfig {
-    /// Parse the CLI shorthand `<type>=<url>`. Errors don't echo the input,
-    /// since it may contain a secret.
+    /// Parse the CLI shorthand `<type>=<url>`, or `<type>+key=<url>` to also
+    /// send the decryption key. Errors don't echo the input, since it may
+    /// contain a secret.
     pub fn parse_shorthand(spec: &str) -> Result<Self> {
         let Some((kind, url)) = spec.split_once('=') else {
             bail!("expected <type>=<url>, e.g. discord=https://discord.com/api/webhooks/...");
         };
+        let kind = kind.trim().to_ascii_lowercase();
+        let (kind, include_key) = match kind.strip_suffix("+key") {
+            Some(k) => (k.to_string(), true),
+            None => (kind, false),
+        };
         let value = serde_json::json!({
-            "type": kind.trim().to_ascii_lowercase(),
+            "type": kind,
             "url": url.trim(),
+            "include_key": include_key,
         });
         serde_json::from_value(value).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    /// Whether this notifier should receive the decryption key.
+    pub fn include_key(&self) -> bool {
+        match self {
+            Self::Discord { include_key, .. } | Self::Webhook { include_key, .. } => *include_key,
+        }
+    }
+
     fn build(&self, http: &reqwest::Client) -> Result<Box<dyn Notifier>> {
         Ok(match self {
-            Self::Discord { url } => Box::new(discord::Discord::new(url, http.clone())?),
-            Self::Webhook { url } => Box::new(webhook::Webhook::new(url, http.clone())?),
+            Self::Discord { url, .. } => Box::new(discord::Discord::new(url, http.clone())?),
+            Self::Webhook { url, .. } => Box::new(webhook::Webhook::new(url, http.clone())?),
         })
     }
 }
 
+/// One configured notifier.
+struct Entry {
+    notifier: Box<dyn Notifier>,
+    include_key: bool,
+}
+
 /// All configured notifiers.
-pub struct Notifiers(Vec<Box<dyn Notifier>>);
+pub struct Notifiers(Vec<Entry>);
 
 impl Notifiers {
     /// Build every notifier up front, so a bad URL fails before the torrent
@@ -127,8 +177,13 @@ impl Notifiers {
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                c.build(&http)
-                    .with_context(|| format!("bad notifier #{}", i + 1))
+                let notifier = c
+                    .build(&http)
+                    .with_context(|| format!("bad notifier #{}", i + 1))?;
+                Ok(Entry {
+                    notifier,
+                    include_key: c.include_key(),
+                })
             })
             .collect::<Result<Vec<_>>>()
             .map(Self)
@@ -136,22 +191,37 @@ impl Notifiers {
 
     /// Log-safe labels (no secrets), one per notifier.
     pub fn labels(&self) -> Vec<String> {
-        self.0.iter().map(|n| n.label()).collect()
+        self.0
+            .iter()
+            .map(|e| {
+                let label = e.notifier.label();
+                if e.include_key {
+                    format!("{label} (with key)")
+                } else {
+                    label
+                }
+            })
+            .collect()
     }
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Send `event` to every notifier at the same time. Failures are logged
-    /// but don't stop the server, since the ticket is also printed locally.
-    /// Returns how many notifiers succeeded.
-    pub async fn send_all(&self, event: &Event) -> usize {
-        let results = n0_future::join_all(self.0.iter().map(|n| async move {
-            let res = tokio::time::timeout(SEND_TIMEOUT, n.send(event))
-                .await
-                .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out")));
-            (n.label(), res)
+    /// Send `event` to every notifier at the same time, adding `key` for the
+    /// ones with `include_key`. Failures are logged but don't stop the
+    /// server, since the ticket is also printed locally. Returns how many
+    /// notifiers succeeded.
+    pub async fn send_all(&self, event: &Event, key: &str) -> usize {
+        let with_key = event.with_key(key);
+        let results = n0_future::join_all(self.0.iter().map(|e| {
+            let event = if e.include_key { &with_key } else { event };
+            async move {
+                let res = tokio::time::timeout(SEND_TIMEOUT, e.notifier.send(event))
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out")));
+                (e.notifier.label(), res)
+            }
         }))
         .await;
         let mut ok = 0;
@@ -212,6 +282,15 @@ mod tests {
                 .is_ok()
         };
         assert!(ok("webhook=https://example.com/hook"));
+        assert!(ok("discord+key=https://discord.com/api/webhooks/1/abc"));
+        assert!(!ok("discord+nope=https://x"));
+        let c = NotifierConfig::parse_shorthand("Webhook+Key=https://x/h").unwrap();
+        assert!(c.include_key());
+        assert!(
+            !NotifierConfig::parse_shorthand("webhook=https://x/h")
+                .unwrap()
+                .include_key()
+        );
         assert!(ok("DISCORD=https://discord.com/api/webhooks/1/abc"));
         assert!(!ok("webhook"));
         assert!(!ok("carrier-pigeon=https://x"));
@@ -234,10 +313,16 @@ mod tests {
             files: 2,
             total_bytes: 10,
             single_use: true,
+            reset: false,
+            key: None,
         });
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v["event"], "ticket_ready");
         assert_eq!(v["ticket"], "t");
         assert_eq!(v["single_use"], true);
+        assert_eq!(v["reset"], false);
+        assert!(v.get("key").is_none());
+        let v = serde_json::to_value(ev.with_key("K")).unwrap();
+        assert_eq!(v["key"], "K");
     }
 }

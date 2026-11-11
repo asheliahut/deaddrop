@@ -29,11 +29,76 @@ pub struct Download {
     pub files: Vec<DownloadedFile>,
 }
 
+/// Largest .torrent file we accept, locally or from a reset request.
+pub const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Where a torrent comes from.
+pub enum Source {
+    /// A magnet URI or an http(s) URL of a .torrent file.
+    Url(String),
+    /// The contents of a .torrent file.
+    Bytes(Vec<u8>),
+}
+
+impl Source {
+    /// Parse a command-line argument: a magnet URI, an http(s) URL, or a path
+    /// to a local .torrent file (which is read here).
+    pub fn from_arg(arg: &str) -> Result<Self> {
+        if is_url(arg) {
+            return Ok(Self::Url(arg.to_string()));
+        }
+        let bytes =
+            std::fs::read(arg).with_context(|| format!("failed to read torrent file {arg}"))?;
+        Self::bytes(bytes)
+    }
+
+    /// A magnet or http(s) URL. Anything else is an error; in particular a
+    /// local path is never accepted, since this is used for remote requests.
+    pub fn url(url: String) -> Result<Self> {
+        if !is_url(&url) {
+            bail!("expected a magnet URI or an http(s) URL");
+        }
+        Ok(Self::Url(url))
+    }
+
+    pub fn bytes(bytes: Vec<u8>) -> Result<Self> {
+        if bytes.len() > MAX_TORRENT_BYTES {
+            bail!(
+                "torrent file is too large ({}, limit {})",
+                human(bytes.len() as u64),
+                human(MAX_TORRENT_BYTES as u64)
+            );
+        }
+        Ok(Self::Bytes(bytes))
+    }
+
+    /// A short description for logs.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Url(u) if u.to_ascii_lowercase().starts_with("magnet:") => "magnet link".into(),
+            Self::Url(_) => "torrent URL".into(),
+            Self::Bytes(b) => format!(".torrent file ({})", human(b.len() as u64)),
+        }
+    }
+
+    fn into_add_torrent(self) -> AddTorrent<'static> {
+        match self {
+            Self::Url(u) => AddTorrent::from_url(u),
+            Self::Bytes(b) => AddTorrent::from_bytes(b),
+        }
+    }
+}
+
+fn is_url(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("magnet:") || lower.starts_with("http://") || lower.starts_with("https://")
+}
+
 /// Download `source` into `dir` and return the files once they are complete.
 /// When this returns, the torrent session has stopped, so nothing is seeded.
-pub async fn download(source: &str, dir: &Path, peers: Vec<SocketAddr>) -> Result<Download> {
+pub async fn download(source: Source, dir: &Path, peers: Vec<SocketAddr>) -> Result<Download> {
     tokio::fs::create_dir_all(dir).await?;
-    let add = to_add_torrent(source)?;
+    let add = source.into_add_torrent();
 
     let session = Session::new_with_opts(
         dir.to_path_buf(),
@@ -145,18 +210,6 @@ pub async fn download(source: &str, dir: &Path, peers: Vec<SocketAddr>) -> Resul
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Download { name, files })
-}
-
-fn to_add_torrent(source: &str) -> Result<AddTorrent<'static>> {
-    let lower = source.to_ascii_lowercase();
-    if lower.starts_with("magnet:") || lower.starts_with("http://") || lower.starts_with("https://")
-    {
-        Ok(AddTorrent::from_url(source.to_string()))
-    } else {
-        let bytes = std::fs::read(source)
-            .with_context(|| format!("failed to read torrent file {source}"))?;
-        Ok(AddTorrent::from_bytes(bytes))
-    }
 }
 
 pub fn human(bytes: u64) -> String {

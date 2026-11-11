@@ -47,8 +47,18 @@ fn render(event: &Event) -> String {
             } else {
                 "multi use"
             };
+            let reset = if t.reset {
+                "\n🔁 This replaces the previous ticket, which no longer works."
+            } else {
+                ""
+            };
+            // A spoiler, so the key isn't readable at a glance.
+            let key = match &t.key {
+                Some(k) => format!("\n🔑 Decryption key (set as DEADDROP_KEY): ||`{k}`||"),
+                None => String::new(),
+            };
             let msg = format!(
-                "📦 **{}** is ready ({} file(s), {}, {mode})\n```\n{}\n```",
+                "📦 **{}** is ready ({} file(s), {}, {mode}){reset}\n```\n{}\n```{key}",
                 // Shorten the name, not the message, so the ticket is never cut off.
                 escape(&truncate(t.name.clone(), 300)),
                 t.files,
