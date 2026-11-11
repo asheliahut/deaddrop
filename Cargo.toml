@@ -1,13 +1,16 @@
 [package]
 name = "deaddrop"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
+rust-version = "1.95"
+publish = false
+description = "Leech a torrent on a server without seeding, age-encrypt it, and hand it to one client peer-to-peer over iroh."
 license = "Unlicense"
 homepage = "https://deaddrop.rip"
 repository = "https://github.com/asheliahut/deaddrop"
 
 [dependencies]
-age = "0.11"
+age = "0.12.1"
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 clap_complete = "4.6.11"
