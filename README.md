@@ -75,13 +75,13 @@ Apple Silicon) and Windows (x86_64 + ARM) are attached to every
 
 ```sh
 # example: Linux x86_64 (static musl build)
-VERSION=v0.1.0
+VERSION=v1.0.0
 curl -LO "https://github.com/asheliahut/deaddrop/releases/download/$VERSION/deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
 sudo install "deaddrop-$VERSION-x86_64-unknown-linux-musl/deaddrop" /usr/local/bin/
 ```
 
-**From source** (needs a recent stable Rust toolchain):
+**From source** (needs Rust 1.95+):
 
 ```sh
 cargo install --locked --git https://github.com/asheliahut/deaddrop
