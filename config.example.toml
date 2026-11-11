@@ -1,0 +1,38 @@
+# deaddrop config file.
+#
+# Default location: ~/.config/deaddrop/config.toml (Linux), or pass --config <file>
+# (or set DEADDROP_CONFIG). Every setting is optional.
+#
+# Precedence: command-line flag > environment variable > this file > default.
+# Relative paths are resolved against this file's directory.
+#
+# This file may hold webhook URLs, which are secrets: chmod 600 it.
+
+# Log filter, same syntax as RUST_LOG. RUST_LOG overrides it.
+log = "warn"
+
+[serve]
+# false (default): shut down after one client has downloaded the data.
+# true: keep serving to any number of clients until Ctrl-C.
+multi_use = false
+
+# Where the torrent data and blob store go. If unset, a temp dir is used and
+# deleted on exit.
+# data_dir = "/var/lib/deaddrop"
+
+# Extra BitTorrent peers to connect to.
+# peers = ["192.168.1.10:6881"]
+
+# Notifiers, sent when the ticket is ready. Add as many as you like.
+# Any --notify flag or DEADDROP_NOTIFY replaces this whole list.
+[[serve.notify]]
+type = "discord"
+url = "https://discord.com/api/webhooks/<id>/<token>"
+
+[[serve.notify]]
+type = "webhook"
+url = "https://example.com/hooks/deaddrop"
+
+[fetch]
+# Where `deaddrop fetch` writes files. Default: the current directory.
+# out = "/home/me/Downloads"
