@@ -68,6 +68,29 @@ That's it. The server exits once the client has everything.
 
 ## 📥 Installation
 
+**Homebrew** (macOS and Linux, Intel + ARM) is the easiest way to install:
+
+```sh
+brew install asheliahut/tap/deaddrop
+```
+
+That one command adds the [`asheliahut/tap`](https://github.com/asheliahut/homebrew-tap)
+tap and installs the prebuilt release binary (the static musl build on Linux).
+You also get:
+
+- bash, zsh and fish completions, loaded automatically (no setup from
+  [Shell completions](#shell-completions) needed)
+- the example config at `$(brew --prefix)/share/deaddrop/config.example.toml`
+- no Gatekeeper prompt on macOS. The release binaries aren't notarized, but
+  Homebrew doesn't quarantine what it installs.
+
+The tap updates on every stable release:
+
+```sh
+brew upgrade deaddrop                                  # update
+brew uninstall deaddrop && brew untap asheliahut/tap   # remove
+```
+
 **Prebuilt binaries** for Linux (gnu + musl, x86_64 + aarch64), macOS (Intel +
 Apple Silicon) and Windows (x86_64 + ARM) are attached to every
 [GitHub release](https://github.com/asheliahut/deaddrop/releases), with
@@ -80,6 +103,18 @@ curl -LO "https://github.com/asheliahut/deaddrop/releases/download/$VERSION/dead
 tar -xzf "deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
 sudo install "deaddrop-$VERSION-x86_64-unknown-linux-musl/deaddrop" /usr/local/bin/
 ```
+
+macOS and Linux tarballs carry signed [build provenance](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
+proving they were built by this repo's release workflow. Verify one with the
+GitHub CLI:
+
+```sh
+gh attestation verify "deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz" --repo asheliahut/deaddrop
+```
+
+On macOS, a binary downloaded through a browser is quarantined and Gatekeeper
+will block it. Use Homebrew or `curl` (which don't quarantine), or clear the flag:
+`xattr -d com.apple.quarantine ./deaddrop`.
 
 **From source** (needs Rust 1.95+):
 
@@ -196,6 +231,10 @@ source <(deaddrop completions zsh)                   # current session only
 
 `deaddrop completions --help` has the full install steps for each shell.
 Re-run it after upgrading so new flags complete too.
+
+Installed with Homebrew? bash, zsh and fish completions are already set up and
+stay current with `brew upgrade`, as long as your shell loads Homebrew's
+completions ([Homebrew docs](https://docs.brew.sh/Shell-Completion)).
 
 ### Help
 
