@@ -2,7 +2,7 @@
 
 # 📦 deaddrop
 
-**Leech a torrent on a server. Encrypt it. Hand it to one client, peer to peer. Leave nothing behind.**
+**Leech a torrent on a server. Hand it to one client over an encrypted peer-to-peer link. Leave nothing behind.**
 
 🌐 **[deaddrop.rip](https://deaddrop.rip)**
 
@@ -14,7 +14,7 @@
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue)](LICENSE)
 [![Website](https://img.shields.io/badge/website-deaddrop.rip-111827)](https://deaddrop.rip)
 [![Powered by iroh](https://img.shields.io/badge/powered_by-iroh-7c3aed)](https://iroh.computer)
-[![Encrypted with age](https://img.shields.io/badge/encrypted_with-age-0f766e)](https://age-encryption.org)
+[![Optional age encryption](https://img.shields.io/badge/optional_encryption-age-0f766e)](https://age-encryption.org)
 
 [Website](https://deaddrop.rip) •
 [Quick start](#-quick-start) •
@@ -29,42 +29,52 @@
 
 ---
 
-A server downloads a torrent **without seeding it**, encrypts the result, then
-hands the files to a client over [iroh](https://iroh.computer) (peer-to-peer
-QUIC with NAT traversal and relay fallback).
+A server downloads a torrent **without seeding it**, then hands the files to a
+client over [iroh](https://iroh.computer) (end-to-end encrypted peer-to-peer
+QUIC with NAT traversal and relay fallback). With `--encrypt`, the files are
+also [age](https://age-encryption.org)-encrypted at rest.
 
 ```mermaid
 flowchart LR
     swarm[("🌐 BitTorrent<br/>swarm")]
-    server["🖥️ deaddrop serve<br/><sub>age-encrypts, deletes plaintext</sub>"]
-    client["💻 deaddrop fetch<br/><sub>verifies + decrypts</sub>"]
+    server["🖥️ deaddrop serve<br/><sub>optionally age-encrypts</sub>"]
+    client["💻 deaddrop fetch<br/><sub>verifies (+ decrypts)</sub>"]
     swarm -- "leech only<br/>(never uploads)" --> server
-    server -- "iroh-blobs<br/>QUIC · BLAKE3-verified · ciphertext" --> client
+    server -- "iroh-blobs<br/>encrypted QUIC · BLAKE3-verified" --> client
 ```
 
 ## ✨ Features
 
 - 🚫 **Zero seeding** – built on librqbit's `disable-upload`, no incoming BitTorrent listener, and the swarm session is torn down before serving starts.
-- 🔐 **End-to-end encrypted** – every file is [age](https://age-encryption.org)-encrypted with a fresh per-torrent key that never touches the server's disk. File names are hidden too.
+- 🔐 **End-to-end encrypted** – iroh connections are QUIC with TLS 1.3, authenticated by the server's key in the ticket, relays included. Add `--encrypt` to also [age](https://age-encryption.org)-encrypt every file (and hide file names) with a fresh per-torrent key that never touches the server's disk.
 - 🕳️ **NAT-proof transfers** – iroh punches through NATs and falls back to relays, so neither side needs an open port.
-- ✅ **Verified delivery** – every chunk is checked against its BLAKE3 hash; tampering or a wrong key fails loudly.
+- ✅ **Verified delivery** – every chunk is checked against its BLAKE3 hash; tampering (or a wrong key) fails loudly.
 - 💥 **Single use by default** – one client, one download, then the server shuts down (or wipes the data and waits).
 - 🔄 **Hot swaps** – point a running server at a new torrent with `deaddrop reset`; the old ticket dies.
 - 🔔 **Notifications** – push tickets to Discord or any webhook, with per-notifier control over who gets the key.
-- 🧩 **Script friendly** – `<ticket> <key>` on stdout, everything else on stderr, TOML config, shell completions.
+- 🧩 **Script friendly** – the ticket (and key, with `--encrypt`) on stdout, everything else on stderr, TOML config, shell completions.
 
 ## 🚀 Quick start
 
 ```sh
 # on the server
 deaddrop serve 'magnet:?xt=urn:btih:...'
-# ...prints:  <ticket> AGE-SECRET-KEY-1...
+# ...prints:  <ticket>
 
 # on the client
-DEADDROP_KEY=AGE-SECRET-KEY-1... deaddrop fetch <ticket> -o ./downloads
+deaddrop fetch <ticket> -o ./downloads
 ```
 
 That's it. The server exits once the client has everything.
+
+Want the data encrypted at rest too, so the ticket alone isn't enough?
+
+```sh
+deaddrop serve --encrypt 'magnet:?xt=urn:btih:...'
+# ...prints:  <ticket> AGE-SECRET-KEY-1...
+
+DEADDROP_KEY=AGE-SECRET-KEY-1... deaddrop fetch <ticket> -o ./downloads
+```
 
 ## 📥 Installation
 
@@ -98,7 +108,7 @@ Apple Silicon) and Windows (x86_64 + ARM) are attached to every
 
 ```sh
 # example: Linux x86_64 (static musl build)
-VERSION=v1.0.0
+VERSION=v2.0.0
 curl -LO "https://github.com/asheliahut/deaddrop/releases/download/$VERSION/deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
 sudo install "deaddrop-$VERSION-x86_64-unknown-linux-musl/deaddrop" /usr/local/bin/
@@ -116,6 +126,10 @@ On macOS, a binary downloaded through a browser is quarantined and Gatekeeper
 will block it. Use Homebrew or `curl` (which don't quarantine), or clear the flag:
 `xattr -d com.apple.quarantine ./deaddrop`.
 
+**Upgrading from 1.x:** 2.0 has breaking changes. Most notably, age
+encryption is now opt-in (`--encrypt`), and a 2.0 client can't download from
+a 1.0 single-use server. See the [changelog](CHANGELOG.md).
+
 **From source** (needs Rust 1.95+):
 
 ```sh
@@ -131,14 +145,14 @@ deaddrop serve 'magnet:?xt=urn:btih:...'          # single use: exits after one 
 deaddrop serve https://example.com/x.torrent      # .torrent URLs and local .torrent paths work too
 deaddrop serve file.torrent --multi-use           # keep serving to any number of clients until Ctrl-C
 deaddrop serve file.torrent --wait-for-reset      # one download per torrent, then wait for the next (needs a reset token)
+deaddrop serve file.torrent --encrypt             # also age-encrypt the files; prints a decryption key
 ```
 
-When the torrent finishes, the server encrypts it, deletes the plaintext, and
-prints a ticket and a decryption key. On the client:
+When the torrent finishes, the server prints a ticket. On the client:
 
 ```sh
-export DEADDROP_KEY=AGE-SECRET-KEY-1...           # the key from `serve`
 deaddrop fetch <ticket> -o ./downloads
+export DEADDROP_KEY=AGE-SECRET-KEY-1...           # only for --encrypt: the key from `serve`
 ```
 
 See [Encryption](#encryption) for what is protected and from whom.
@@ -153,9 +167,12 @@ See [Encryption](#encryption) for what is protected and from whom.
 | `--notify <TYPE=URL>` | Send the ticket somewhere when it's ready. Repeatable. See [Notifications](#notifications). |
 | `--reset-token <TOKEN>` | Let `deaddrop reset` switch the server to a different torrent. See [Resetting a server](#resetting-a-server). Prefer `DEADDROP_RESET_TOKEN` or the config file. |
 | `--wait-for-reset` | Single use, needs a reset token: after the one download, delete the data and keep running until a reset brings the next torrent. See [Single use, long running](#single-use-long-running). |
+| `--encrypt` | Also age-encrypt the files before serving them, delete the plaintext, and print a decryption key. Off by default, since iroh already encrypts the connection. See [Encryption](#encryption). |
+| `--hide-key` | Only with `--encrypt`: never print the decryption key; send it only to notifiers with `include_key` (at least one is required). See [Encryption](#encryption). |
 | `-c, --config <FILE>` | TOML config file (works with every command). See [Config file](#config-file). |
 
-`fetch` takes `-o/--out <DIR>` (default: the current directory).
+`fetch` takes `-o/--out <DIR>` (default: the current directory) and, for
+data served with `--encrypt`, the key in `DEADDROP_KEY` or `--key`.
 
 ### Resetting a server
 
@@ -177,8 +194,8 @@ deaddrop reset <ticket> 'magnet:?xt=urn:btih:...'   # or an http(s) .torrent URL
   never treats a reset source as a path on its own disk.
 - The server keeps serving the current torrent while the new one downloads.
   If the download fails, nothing changes and `reset` reports the error.
-- Once the new torrent is ready, the server prints the new ticket and its new
-  decryption key (another line on stdout), sends them to the notifiers with
+- Once the new torrent is ready, the server prints the new ticket (and, with
+  `--encrypt`, its new decryption key) as another line on stdout, sends them to the notifiers with
   `"reset": true`, and `deaddrop reset` prints them too. `--no-wait` returns as soon as the server
   accepts the request.
 - **The old ticket stops working.** Transfers already in progress finish, then
@@ -203,9 +220,9 @@ where every torrent can be downloaded exactly once:
 export DEADDROP_RESET_TOKEN=$(openssl rand -hex 32)
 deaddrop serve first.torrent --wait-for-reset
 
-DEADDROP_KEY=<key> deaddrop fetch <ticket>    # the one download
+deaddrop fetch <ticket>                       # the one download
 deaddrop reset <ticket> 'magnet:?xt=...'      # any ticket from this server works
-DEADDROP_KEY=<new key> deaddrop fetch <new ticket>   # each torrent has its own key
+deaddrop fetch <new ticket>
 ```
 
 1. The server serves the torrent to one client, as in normal single use.
@@ -218,6 +235,35 @@ DEADDROP_KEY=<new key> deaddrop fetch <new ticket>   # each torrent has its own 
 
 Nothing is deleted on Ctrl-C beyond what normal single use does: with
 `--data-dir`, a torrent that wasn't downloaded yet stays on disk.
+
+### Agent skill for AI coding agents
+
+`deaddrop skill` installs an [Agent Skill](https://agentskills.io) that
+teaches AI coding agents how to use deaddrop: serving, fetching, resets, and
+setting up a config file step by step. The skill matches the installed
+version, and includes the full config reference.
+
+```sh
+deaddrop skill install                                  # asks where, and for which agents
+deaddrop skill install --global --harness claude,codex  # for your user, in every project
+deaddrop skill install --project --all                  # only this repository; commit it to share
+deaddrop skill status                                   # where it's installed, and if it's current
+deaddrop skill uninstall --global --all
+deaddrop skill show                                     # print SKILL.md
+```
+
+| `--harness` | Global | Project |
+| --- | --- | --- |
+| `claude` (Claude Code) | `~/.claude/skills/` | `.claude/skills/` |
+| `codex` (OpenAI Codex) | `~/.agents/skills/` | `.agents/skills/` |
+| `copilot` (GitHub Copilot) | `~/.copilot/skills/` | `.github/skills/` |
+| `agents` (shared Agent Skills location, also read by the Copilot CLI and others) | `~/.agents/skills/` | `.agents/skills/` |
+
+The project is the enclosing git repository, or the current directory
+(`--dir` picks another). Run `install` again after upgrading deaddrop to
+update the skill. deaddrop only replaces or removes a `deaddrop` skill that
+it wrote, unless you pass `--force`, and `uninstall` keeps any other files
+you added to the skill's folder.
 
 ### Shell completions
 
@@ -242,11 +288,12 @@ completions ([Homebrew docs](https://docs.brew.sh/Shell-Completion)).
 examples, environment variables, config precedence and exit codes. `-h` gives
 a shorter summary.
 
-Each ticket goes to stdout as one `<ticket> <key>` line, and everything else
-goes to stderr. So `deaddrop serve x.torrent > tickets.txt` and then
-`read -r TICKET KEY < tickets.txt` works in scripts. After a
-[reset](#resetting-a-server), the new ticket and key are printed as another
-line.
+Each ticket goes to stdout as one line, `<ticket>` or, with `--encrypt`,
+`<ticket> <key>`. Everything else goes to stderr. So
+`deaddrop serve x.torrent > tickets.txt` and then
+`read -r TICKET KEY < tickets.txt` works in scripts (`KEY` is empty without
+`--encrypt`). After a [reset](#resetting-a-server), the new ticket is printed
+as another line.
 
 ### Logging
 
@@ -256,6 +303,20 @@ log warnings. Set `RUST_LOG` (e.g. `RUST_LOG=info`) or `log` in the
 any build. This only covers the log output from deaddrop and its libraries.
 The status lines (progress, the ticket, reset messages) are always printed to
 stderr.
+
+### Progress
+
+On a terminal, deaddrop shows progress bars on stderr:
+
+- `serve`: one for the torrent download, then one per client transfer
+  (several at once with `--multi-use`), each named by the client's short id.
+- `fetch`: one for the download, with the total size and an ETA. The client
+  first asks the server for the collection's size with a small probe request.
+  This needs a 2.0 server: a 1.0 single-use server would count the probe as
+  the download and refuse the real one.
+
+When stderr isn't a terminal (a log file, systemd, a pipe), there are no bars,
+just a plain progress line every few seconds.
 
 ## Config file
 
@@ -279,8 +340,10 @@ data_dir = "/var/lib/deaddrop"
 peers = ["192.168.1.10:6881"]
 # reset_token = "<long random string>"     # see "Resetting a server"
 # wait_for_reset = false                    # single use: stay up for resets
+# encrypt = false                           # true: also age-encrypt the files
+# hide_key = false                          # with encrypt: key goes only to include_key notifiers
 
-# Notifiers get the ticket only; include_key = true also sends the decryption key.
+# Notifiers get the ticket only; with encrypt, include_key = true also sends the decryption key.
 [[serve.notify]]
 type = "discord"
 url = "https://discord.com/api/webhooks/<id>/<token>"
@@ -295,6 +358,10 @@ out = "/home/me/Downloads"
 
 [reset]
 # token = "<long random string>"           # used by `deaddrop reset`
+
+[relay]
+# mode = "default"                          # "default" (n0), "custom", or "disabled"
+# urls = ["https://relay.example.com"]      # your own relays; implies mode = "custom"
 ```
 
 - **Where it's read from:** `--config <file>` or `DEADDROP_CONFIG`. Otherwise
@@ -336,12 +403,13 @@ deaddrop serve x.torrent
 Sources aren't merged: `--notify` flags replace `DEADDROP_NOTIFY`, which
 replaces the config file's list.
 
-By default a notifier gets the ticket but **not the decryption key**. Choose
-per notifier which ones get the key: add `+key` to the type on the command
+With `--encrypt`, a notifier gets the ticket but **not the decryption key** by
+default. Choose per notifier which ones get the key: add `+key` to the type on the command
 line (`webhook+key=https://...`) or set `include_key = true` in its
 `[[serve.notify]]` table. For example, post the ticket to a Discord channel
 and send the key to a private webhook, so a leaked channel alone isn't
-enough to read the data.
+enough to read the data. Without `--encrypt` there is no key, and the ticket
+alone gives access, so only send it where you'd send the data.
 
 | Type | What it sends |
 | --- | --- |
@@ -381,8 +449,17 @@ New kinds of events (e.g. "client finished downloading") are variants of the
 
 ## Encryption
 
-The data is encrypted before iroh ever sees it, so it doesn't depend on
-trusting iroh's transport or relays:
+**In transit, always.** iroh connections are QUIC with TLS 1.3, end to end
+between client and server. The ticket holds the server's public key, so the
+client knows it's talking to the right server, and relays only ever forward
+encrypted packets. Every chunk is also checked against its BLAKE3 hash.
+
+**At rest, with `--encrypt`.** Without it, the downloaded files sit on the
+server's disk as they are while they're served (deleted afterwards, as
+described above), their names are in the collection, and **anyone with the
+ticket can download them**. `--encrypt` (or `encrypt = true` in the config
+file) adds a layer of [age](https://age-encryption.org) encryption, so the
+data doesn't depend on keeping the ticket secret or on the server's disk:
 
 1. When the torrent finishes, each file is encrypted with
    [age](https://age-encryption.org) to a new X25519 key made for that
@@ -394,26 +471,63 @@ trusting iroh's transport or relays:
    are in an encrypted manifest (`deaddrop-manifest.age`).
 3. The key lives only in the server's memory. It is printed (stderr and
    stdout) and sent to the notifiers that ask for it, never written to the
-   server's disk. Each reset gets a new key.
+   server's disk. Each reset gets a new key. With `--hide-key` (or
+   `hide_key = true`) it is not printed at all, and not sent back to
+   `deaddrop reset` either: the notifiers with `include_key` get the only
+   copies. The server refuses to start without one, and says so loudly if
+   none of them accepted the key.
 4. `fetch` downloads the ciphertext, then decrypts each file into place. A
    wrong key or tampered data fails (age authenticates every chunk), and no
    partial file is left under the real name.
 
-What it doesn't hide: file sizes and file count, and that a transfer
+What `--encrypt` doesn't hide: file sizes and file count, and that a transfer
 happened. The plaintext does exist on the server's disk while the torrent
 downloads, and deleting a file doesn't securely erase it (especially on
 SSDs). If the server's stderr goes to a persistent log (systemd journal, a
-log file), the key ends up there too.
+log file), the key ends up there too, unless you use `--hide-key`.
+
+## Connection paths and relays
+
+iroh first reaches the other side through a relay server and any addresses
+in the ticket, then tries to hole-punch a direct UDP path and moves the
+traffic there if that works. Both `serve` and `fetch` print which path a
+connection is using, and print again when it switches between the relay and
+a direct path:
+
+```text
+connection to e86045b272 using the relay https://use1-1.relay.n0.iroh.link./
+connection to e86045b272 switched to a direct path (203.0.113.7:50687)
+```
+
+If the relay line is the last one you see, no direct path could be made
+(for example both sides are behind symmetric NATs, or UDP is blocked). The
+data is still end-to-end encrypted, but n0's public relays are rate limited,
+so large transfers will be slow.
+
+The `[relay]` config section picks the relays:
+
+- `mode = "default"` uses n0's public relays.
+- `urls = [...]` (or `mode = "custom"`) uses only your relays, for example
+  your own [`iroh-relay`](https://crates.io/crates/iroh-relay) server.
+- `mode = "disabled"` turns relays off. Then a transfer only works if the
+  two sides can reach each other directly or by hole punching.
+
+The ticket carries the server's relay URL and direct addresses. If you use
+your own relays, give the server and the client the same `urls`. With
+relays disabled on the server, the ticket has only direct addresses.
 
 ## Notes
 
-- Encrypted files are imported into the iroh blob store by reference, not
-  copied, so disk usage isn't doubled.
+- Files (encrypted or not) are imported into the iroh blob store by
+  reference, not copied, so disk usage isn't doubled.
 - The client checks every received chunk against its BLAKE3 hash. It refuses
   file names that are absolute or contain `..`.
-- Anyone who has the ticket can download the encrypted data; the key is
-  needed to read it. Treat both as secrets, and send them over different
-  channels when you can.
+- Anyone who has the ticket can download the data. With `--encrypt` the key
+  is also needed to read it. Treat both as secrets, and send them over
+  different channels when you can.
+- If `fetch` of encrypted data is run without the key, the download is kept
+  in `.deaddrop-<hash>` in the output folder, so running it again with the
+  key works even after a single-use server has shut down.
 
 ## Testing locally
 
@@ -423,7 +537,7 @@ the public swarm:
 ```sh
 cargo run --example seed -- ./some-dir       # prints magnet + peer address, writes ./some-dir.torrent
 cargo run -- serve ./some-dir.torrent --peer 127.0.0.1:<port>
-DEADDROP_KEY=<key> cargo run -- fetch <ticket> -o /tmp/out
+cargo run -- fetch <ticket> -o /tmp/out
 ```
 
 ## 🤝 Contributing
@@ -449,7 +563,7 @@ two files of work.
 
 - [iroh](https://iroh.computer) and [iroh-blobs](https://github.com/n0-computer/iroh-blobs): P2P QUIC transport and verified blob transfer
 - [librqbit](https://github.com/ikatson/rqbit): the BitTorrent engine
-- [age](https://github.com/str4d/rage): file encryption
+- [age](https://github.com/str4d/rage): optional file encryption
 - [clap](https://github.com/clap-rs/clap), [tokio](https://tokio.rs), and the rest of the Rust ecosystem
 
 ## 📜 License

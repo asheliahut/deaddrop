@@ -4,13 +4,16 @@
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
+use crate::ui;
 use anyhow::{Context, Result, bail};
+use indicatif::{ProgressBar, ProgressStyle};
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, Session, SessionOptions,
-    api::TorrentIdOrHash,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, DhtSessionConfig, ManagedTorrent, Session,
+    SessionOptions, api::TorrentIdOrHash,
 };
 
 /// One file from a finished torrent.
@@ -138,39 +141,16 @@ pub async fn download(source: Source, dir: &Path, peers: Vec<SocketAddr>) -> Res
         }
     };
 
-    eprintln!(
+    say!(
         "torrent: resolving metadata for {}",
         handle
             .name()
             .unwrap_or_else(|| handle.info_hash().as_string())
     );
 
-    // Print progress while the download runs.
-    let progress = tokio::spawn({
-        let handle = handle.clone();
-        async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let s = handle.stats();
-                if s.total_bytes > 0 {
-                    let pct = s.progress_bytes as f64 / s.total_bytes as f64 * 100.0;
-                    let speed = s
-                        .live
-                        .as_ref()
-                        .map(|l| format!(", {}", l.download_speed))
-                        .unwrap_or_default();
-                    eprintln!(
-                        "torrent: {pct:5.1}% ({} / {}){speed}",
-                        human(s.progress_bytes),
-                        human(s.total_bytes)
-                    );
-                }
-            }
-        }
-    });
-
+    let progress = Progress::start(handle.clone());
     let res = handle.wait_until_completed().await;
-    progress.abort();
+    progress.finish(res.is_ok());
     res.context("torrent download failed")?;
 
     let name = handle
@@ -193,7 +173,7 @@ pub async fn download(source: Source, dir: &Path, peers: Vec<SocketAddr>) -> Res
         .context("failed to remove the torrent from the session")?;
     session.stop().await;
     drop(handle);
-    eprintln!("torrent: download complete, seeding stopped");
+    say!("torrent: download complete, seeding stopped");
 
     let files = files
         .into_iter()
@@ -210,6 +190,100 @@ pub async fn download(source: Source, dir: &Path, peers: Vec<SocketAddr>) -> Res
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Download { name, files })
+}
+
+/// Download progress on stderr: a progress bar on a terminal, otherwise a
+/// plain line every few seconds (for logs, systemd, `2> file`).
+struct Progress {
+    task: tokio::task::JoinHandle<()>,
+    bar: Option<ProgressBar>,
+    started: Instant,
+}
+
+impl Progress {
+    fn start(handle: Arc<ManagedTorrent>) -> Self {
+        let started = Instant::now();
+        if ui::bars() {
+            let bar = ui::add(ProgressBar::new_spinner().with_message("waiting for metadata"));
+            bar.set_style(
+                ProgressStyle::with_template("{spinner:.green} {prefix}: {msg}")
+                    .expect("valid template"),
+            );
+            bar.set_prefix("torrent");
+            bar.enable_steady_tick(Duration::from_millis(100));
+            let task = tokio::spawn(update_bar(handle, bar.clone()));
+            Self {
+                task,
+                bar: Some(bar),
+                started,
+            }
+        } else {
+            Self {
+                task: tokio::spawn(print_lines(handle)),
+                bar: None,
+                started,
+            }
+        }
+    }
+
+    fn finish(self, ok: bool) {
+        self.task.abort();
+        if let Some(bar) = self.bar {
+            if ok {
+                let total = bar.length().unwrap_or(bar.position());
+                ui::finish_bar(
+                    &bar,
+                    format!(
+                        "torrent: downloaded {}",
+                        ui::rate_summary(total, self.started.elapsed())
+                    ),
+                );
+            } else {
+                ui::fail_bar(&bar, "torrent: download failed".into());
+            }
+        }
+    }
+}
+
+async fn update_bar(handle: Arc<ManagedTorrent>, bar: ProgressBar) {
+    let mut sized = false;
+    loop {
+        let s = handle.stats();
+        if s.total_bytes > 0 {
+            if !sized {
+                // Metadata is in: switch from the spinner to a byte bar.
+                bar.set_length(s.total_bytes);
+                bar.set_style(ui::sized_style());
+                bar.reset_eta();
+                sized = true;
+            }
+            bar.set_position(s.progress_bytes);
+            let peers = s.live.as_ref().map_or(0, |l| l.snapshot.peer_stats.live);
+            let plural = if peers == 1 { "" } else { "s" };
+            bar.set_message(format!("({peers} peer{plural})"));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn print_lines(handle: Arc<ManagedTorrent>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let s = handle.stats();
+        if s.total_bytes > 0 {
+            let pct = s.progress_bytes as f64 / s.total_bytes as f64 * 100.0;
+            let speed = s
+                .live
+                .as_ref()
+                .map(|l| format!(", {}", l.download_speed))
+                .unwrap_or_default();
+            say!(
+                "torrent: {pct:5.1}% ({} / {}){speed}",
+                human(s.progress_bytes),
+                human(s.total_bytes)
+            );
+        }
+    }
 }
 
 pub fn human(bytes: u64) -> String {

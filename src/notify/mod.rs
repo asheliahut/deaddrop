@@ -11,8 +11,9 @@
 //!
 //! or with the `--notify <type>=<url>` shorthand on the command line.
 //!
-//! The decryption key is only sent to notifiers with `include_key = true`
-//! (shorthand: `<type>+key=<url>`). The others get the ticket alone.
+//! When the server encrypts the data (`--encrypt`), the decryption key is
+//! only sent to notifiers with `include_key = true` (shorthand:
+//! `<type>+key=<url>`). The others get the ticket alone.
 //!
 //! # Adding a new notifier
 //!
@@ -208,34 +209,54 @@ impl Notifiers {
         self.0.is_empty()
     }
 
-    /// Send `event` to every notifier at the same time, adding `key` for the
-    /// ones with `include_key`. Failures are logged but don't stop the
-    /// server, since the ticket is also printed locally. Returns how many
-    /// notifiers succeeded.
-    pub async fn send_all(&self, event: &Event, key: &str) -> usize {
-        let with_key = event.with_key(key);
+    /// Whether any notifier gets the decryption key.
+    pub fn sends_key(&self) -> bool {
+        self.0.iter().any(|e| e.include_key)
+    }
+
+    /// Send `event` to every notifier at the same time, adding `key` (if the
+    /// data is encrypted) for the ones with `include_key`. Failures are
+    /// logged but don't stop the server, since the ticket is also printed
+    /// locally.
+    pub async fn send_all(&self, event: &Event, key: Option<&str>) -> Sent {
+        let with_key = key.map(|k| event.with_key(k));
         let results = n0_future::join_all(self.0.iter().map(|e| {
-            let event = if e.include_key { &with_key } else { event };
+            let (event, got_key) = match &with_key {
+                Some(with_key) if e.include_key => (with_key, true),
+                _ => (event, false),
+            };
             async move {
                 let res = tokio::time::timeout(SEND_TIMEOUT, e.notifier.send(event))
                     .await
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("timed out")));
-                (e.notifier.label(), res)
+                (e.notifier.label(), got_key, res)
             }
         }))
         .await;
-        let mut ok = 0;
-        for (label, res) in results {
+        let mut sent = Sent::default();
+        for (label, with_key, res) in results {
             match res {
                 Ok(()) => {
-                    ok += 1;
-                    eprintln!("notify: sent to {label}");
+                    sent.ok += 1;
+                    if with_key {
+                        sent.with_key += 1;
+                    }
+                    say!("notify: sent to {label}");
                 }
-                Err(e) => eprintln!("notify: warning: {label} failed: {e:#}"),
+                Err(e) => say!("notify: warning: {label} failed: {e:#}"),
             }
         }
-        ok
+        sent
     }
+}
+
+/// What [`Notifiers::send_all`] managed to deliver.
+#[derive(Debug, Default)]
+pub struct Sent {
+    /// Notifiers that succeeded.
+    pub ok: usize,
+    /// Of those, how many got the decryption key.
+    pub with_key: usize,
 }
 
 /// Parse and check an http(s) URL. Errors don't include the URL.

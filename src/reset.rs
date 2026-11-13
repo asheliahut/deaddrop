@@ -28,7 +28,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use iroh::{
     Endpoint, EndpointId,
-    endpoint::{Connection, SendStream, presets},
+    endpoint::{Connection, SendStream},
     protocol::{AcceptError, ProtocolHandler},
 };
 use iroh_blobs::ticket::BlobTicket;
@@ -61,9 +61,21 @@ const BAD_TOKEN_DELAY: Duration = Duration::from_secs(1);
 #[serde(tag = "status", rename_all = "snake_case")]
 enum Reply {
     Accepted,
-    Rejected { error: String },
-    Ready { ticket: String, key: String },
-    Failed { error: String },
+    Rejected {
+        error: String,
+    },
+    Ready {
+        ticket: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        /// The data is encrypted but the server only sends the key to its
+        /// notifiers (hide_key).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        key_hidden: bool,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 impl Reply {
@@ -81,8 +93,11 @@ impl Reply {
 /// What a finished reset hands back to the requester.
 pub struct NewTicket {
     pub ticket: String,
-    /// The new torrent's decryption key.
-    pub key: String,
+    /// The new torrent's decryption key, if the server encrypts and
+    /// doesn't hide it.
+    pub key: Option<String>,
+    /// The server encrypts but only sends the key to its notifiers.
+    pub key_hidden: bool,
 }
 
 /// Check a reset token's format. Used for both `serve` and `reset`.
@@ -149,7 +164,7 @@ impl ProtocolHandler for Handler {
     async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
         let remote = conn.remote_id();
         if let Err(e) = self.handle(&conn, remote).await {
-            eprintln!("reset: request from {remote} failed: {e:#}");
+            say!("reset: request from {remote} failed: {e:#}");
         }
         // Give the client a moment to read the last reply and hang up.
         tokio::time::timeout(CLOSE_GRACE, conn.closed()).await.ok();
@@ -170,7 +185,7 @@ impl Handler {
             Err(e) => return reject(&mut send, &format!("bad request: {e:#}")).await,
         };
         if !constant_time_eq(token, self.token.as_bytes()) {
-            eprintln!("reset: rejected request from {remote}: wrong token");
+            say!("reset: rejected request from {remote}: wrong token");
             tokio::time::sleep(BAD_TOKEN_DELAY).await;
             return reject(&mut send, "wrong reset token").await;
         }
@@ -179,7 +194,7 @@ impl Handler {
         }
         let busy = BusyGuard(self.busy.clone());
 
-        eprintln!("reset: {remote} asked to switch to a {}", source.describe());
+        say!("reset: {remote} asked to switch to a {}", source.describe());
         let (reply_tx, reply_rx) = oneshot::channel();
         let job = Job {
             source,
@@ -194,7 +209,15 @@ impl Handler {
         write_reply(&mut send, &Reply::Accepted).await.ok();
 
         let reply = match reply_rx.await {
-            Ok(Ok(NewTicket { ticket, key })) => Reply::Ready { ticket, key },
+            Ok(Ok(NewTicket {
+                ticket,
+                key,
+                key_hidden,
+            })) => Reply::Ready {
+                ticket,
+                key,
+                key_hidden,
+            },
             Ok(Err(error)) => Reply::Failed { error },
             Err(_) => Reply::Failed {
                 error: "the server stopped before the reset finished".into(),
@@ -268,9 +291,15 @@ fn encode_request(token: &str, source: &Source) -> Vec<u8> {
 
 /// Ask the server named in `ticket` to switch to `source`. With `wait`, block
 /// until the new torrent is being served and print the new ticket.
-pub async fn request(ticket: BlobTicket, source: Source, token: String, wait: bool) -> Result<()> {
+pub async fn request(
+    ticket: BlobTicket,
+    source: Source,
+    token: String,
+    wait: bool,
+    relay: &iroh::RelayMode,
+) -> Result<()> {
     check_token(&token)?;
-    let endpoint = Endpoint::builder(presets::N0).bind().await?;
+    let endpoint = crate::net::bind(relay).await?;
     let res = run_request(&endpoint, &ticket, &source, &token, wait).await;
     endpoint.close().await;
     res
@@ -283,7 +312,7 @@ async fn run_request(
     token: &str,
     wait: bool,
 ) -> Result<()> {
-    eprintln!("connecting to {}", ticket.addr().id);
+    say!("connecting to {}", ticket.addr().id);
     let conn = endpoint
         .connect(ticket.addr().clone(), ALPN)
         .await
@@ -306,7 +335,7 @@ async fn run_request(
     };
 
     match next().await? {
-        Reply::Accepted => eprintln!("reset accepted; the server is downloading the new torrent"),
+        Reply::Accepted => say!("reset accepted; the server is downloading the new torrent"),
         Reply::Rejected { error } => bail!("the server refused the reset: {error}"),
         other => bail!("unexpected reply from the server: {}", other.status()),
     }
@@ -314,11 +343,20 @@ async fn run_request(
         conn.close(0u32.into(), b"bye");
         return Ok(());
     }
-    eprintln!("waiting for it to finish (Ctrl-C stops waiting; the reset carries on)");
+    say!("waiting for it to finish (Ctrl-C stops waiting; the reset carries on)");
     let res = match next().await? {
-        Reply::Ready { ticket, key } => {
-            eprintln!("the server is now serving the new torrent.");
-            crate::print_ticket(&ticket, &key)
+        Reply::Ready {
+            ticket,
+            key,
+            key_hidden,
+        } => {
+            say!("the server is now serving the new torrent.");
+            if key_hidden {
+                say!(
+                    "the data is encrypted; the server sent the decryption key to its notifiers only"
+                );
+            }
+            crate::print_ticket(&ticket, key.as_deref())
         }
         Reply::Failed { error } => Err(anyhow::anyhow!(
             "reset failed: {error} (the server keeps serving the old torrent)"

@@ -1,0 +1,88 @@
+# deaddrop config file reference
+
+Every setting deaddrop reads from its TOML config file, as printed by `deaddrop config example`. Every key is optional. Precedence: command-line flag > environment variable > config file > default. Validate with `deaddrop config check`.
+
+<!-- generated-by: deaddrop -->
+
+```toml
+# deaddrop config file.
+#
+# Default location: ~/.config/deaddrop/config.toml (Linux), or pass --config <file>
+# (or set DEADDROP_CONFIG). Every setting is optional.
+#
+# Precedence: command-line flag > environment variable > this file > default.
+# Relative paths are resolved against this file's directory.
+#
+# This file may hold webhook URLs, which are secrets: chmod 600 it.
+
+# Log filter, same syntax as RUST_LOG. RUST_LOG overrides it.
+# "off" disables logging entirely. Default: "off" in release builds,
+# "warn" in debug builds.
+# log = "warn"
+
+[serve]
+# false (default): shut down after one client has downloaded the data.
+# true: keep serving to any number of clients until Ctrl-C.
+multi_use = false
+
+# Where the torrent data and blob store go. If unset, a temp dir is used and
+# deleted on exit.
+# data_dir = "/var/lib/deaddrop"
+
+# Extra BitTorrent peers to connect to.
+# peers = ["192.168.1.10:6881"]
+
+# Let `deaddrop reset` replace the torrent being served with a new magnet or
+# .torrent. Anyone with the ticket AND this token can do it. At least 16
+# characters; `openssl rand -hex 32` makes a good one. Unset (the default)
+# turns resets off. DEADDROP_RESET_TOKEN overrides it.
+# reset_token = "<long random string>"
+
+# Single use only, needs reset_token: instead of exiting after the one
+# download, delete the data and wait for a reset to bring the next torrent.
+# wait_for_reset = false
+
+# Also age-encrypt the files before serving them, delete the plaintext, and
+# print a decryption key the client needs. Off by default: iroh already
+# encrypts the connection. Turn it on if the ticket alone shouldn't be enough
+# to read the data, or the plaintext shouldn't stay on disk while serving.
+# encrypt = false
+
+# Only with encrypt = true: never print the decryption key (stdout gets just
+# the ticket) and never send it back to `deaddrop reset`. The only copies go
+# to notifiers with include_key = true, and at least one is required. Keeps
+# the key out of terminals and logs. No effect without encrypt.
+# hide_key = false
+
+# Notifiers, sent when the ticket is ready. Add as many as you like.
+# Any --notify flag or DEADDROP_NOTIFY replaces this whole list.
+# With encrypt = true, include_key = true also sends the decryption key
+# (default: ticket only).
+[[serve.notify]]
+type = "discord"
+url = "https://discord.com/api/webhooks/<id>/<token>"
+
+[[serve.notify]]
+type = "webhook"
+url = "https://example.com/hooks/deaddrop"
+include_key = true
+
+[fetch]
+# Where `deaddrop fetch` writes files. Default: the current directory.
+# out = "/home/me/Downloads"
+
+[reset]
+# The server's reset token, used by `deaddrop reset`. --token and
+# DEADDROP_RESET_TOKEN override it.
+# token = "<long random string>"
+
+[relay]
+# Relay servers, used by serve, fetch and reset. iroh always tries a direct
+# (hole-punched) path; relays get the connection started and carry the data
+# if no direct path works. Each connection prints which path it uses.
+#   "default"  n0's public relays (the default)
+#   "custom"   only the relays in `urls`, e.g. your own iroh-relay
+#   "disabled" no relays: both sides must reach each other directly
+# mode = "default"
+# urls = ["https://relay.example.com"]   # setting urls implies mode = "custom"
+```

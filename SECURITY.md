@@ -61,9 +61,12 @@ disclose.
 In scope are problems in deaddrop's own code that break what it promises.
 For example:
 
-- **Confidentiality:** recovering plaintext file contents, file names or the
-  torrent name without the key; the decryption key being written to the
-  server's disk or leaked to a notifier that doesn't have `include_key`.
+- **Confidentiality:** a party without the ticket (a relay, a network
+  observer) reading the data; with `--encrypt`, recovering plaintext file
+  contents, file names or the torrent name without the key, or the decryption
+  key being written to the server's disk, leaked to a notifier that doesn't
+  have `include_key`, or, with `--hide-key`, showing up in any output or reset
+  reply.
 - **Integrity:** `fetch` accepting tampered or wrong-key data, or writing a
   partial file under its real name.
 - **Client file system:** a malicious server making `fetch` write outside the
@@ -83,14 +86,17 @@ For example:
 
 These are known limits, documented in the [README](README.md#encryption):
 
+- Without `--encrypt` (the default), anyone holding the ticket can download
+  and read the data, and it is stored on the server's disk as plaintext while
+  it is served.
 - File sizes, file count, and the fact that a transfer happened are not
   hidden.
 - Plaintext exists on the server's disk while the torrent downloads, and
   deletion is not secure erasure (especially on SSDs).
-- The key appears on the server's stderr/stdout, so a persistent log of that
-  output (systemd journal, log files) contains it.
-- Anyone holding the ticket can download the ciphertext; anyone holding both
-  the ticket and the key can read it.
+- With `--encrypt` (and without `--hide-key`), the key appears on the server's stderr/stdout,
+  so a persistent log of that output (systemd journal, log files) contains it.
+- With `--encrypt`, anyone holding the ticket can download the ciphertext;
+  anyone holding both the ticket and the key can read it.
 - The BitTorrent swarm, trackers and DHT can see the server's IP address
   while it leeches.
 - Content legality, or what users choose to share.
@@ -101,7 +107,10 @@ exploitable, or ships a version with a known advisory, report it here.
 
 ## Hardening tips for users
 
-- Send the ticket and the key over different channels.
+- Treat the ticket as a secret: without `--encrypt` it is all anyone needs.
+- Use `--encrypt` when the server's disk or the channel the ticket travels
+  over isn't trusted, and send the ticket and the key over different
+  channels.
 - Prefer the config file (`chmod 600`) or environment variables over
   command-line flags for webhook URLs and reset tokens, to keep them out of
   shell history and `ps`.

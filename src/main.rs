@@ -1,14 +1,18 @@
 //! deaddrop: fetch a torrent on a server (without seeding it), then hand the
 //! data to a client over iroh.
 
+#[macro_use]
+mod ui;
 mod cli;
 mod client;
 mod config;
 mod crypt;
 mod gate;
+mod net;
 mod notify;
 mod reset;
 mod server;
+mod skill;
 mod torrent;
 
 use anyhow::{Context, Result};
@@ -16,7 +20,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::{
-    cli::{Cli, Command, ConfigAction},
+    cli::{Cli, Command, ConfigAction, SkillAction},
     notify::{NotifierConfig, Notifiers},
 };
 
@@ -39,8 +43,22 @@ async fn main() -> Result<()> {
         Command::Completions { shell } => return completions(*shell),
         _ => {}
     }
+    if let Command::Skill { action } = cli.command {
+        return match action {
+            SkillAction::Install { target, force } => skill::install(target.into_target(), force),
+            SkillAction::Uninstall { target, force } => {
+                skill::uninstall(target.into_target(), force)
+            }
+            SkillAction::Status { dir } => skill::status(dir),
+            SkillAction::Show => skill::show(),
+        };
+    }
 
     let (config, _) = config::load(cli.config.as_deref())?;
+    let relay = config
+        .relay
+        .to_mode()
+        .context("invalid [relay] settings in the config file")?;
 
     // RUST_LOG > config `log` > DEFAULT_LOG.
     let filter = match EnvFilter::try_from_default_env() {
@@ -64,6 +82,8 @@ async fn main() -> Result<()> {
             notify,
             reset_token,
             wait_for_reset,
+            encrypt,
+            hide_key,
         } => {
             let file = config.serve;
             // Flags and DEADDROP_NOTIFY arrive here together (clap handles
@@ -81,6 +101,9 @@ async fn main() -> Result<()> {
                 notify,
                 reset_token: reset_token.filter(|t| !t.is_empty()).or(file.reset_token),
                 wait_for_reset: wait_for_reset.or(file.wait_for_reset).unwrap_or(false),
+                encrypt: encrypt.or(file.encrypt).unwrap_or(false),
+                hide_key: hide_key.or(file.hide_key).unwrap_or(false),
+                relay,
             })
             .await
         }
@@ -93,18 +116,26 @@ async fn main() -> Result<()> {
             let token = token.filter(|t| !t.is_empty()).or(config.reset.token).context(
                 "no reset token: pass --token, set DEADDROP_RESET_TOKEN, or set reset.token in the config file",
             )?;
-            reset::request(ticket, torrent::Source::from_arg(&source)?, token, !no_wait).await
+            reset::request(
+                ticket,
+                torrent::Source::from_arg(&source)?,
+                token,
+                !no_wait,
+                &relay,
+            )
+            .await
         }
         Command::Fetch { ticket, out, key } => {
-            let key = key.filter(|k| !k.is_empty()).context(
-                "the data is encrypted: pass the decryption key from `deaddrop serve` \
-                 in DEADDROP_KEY or with --key",
-            )?;
-            let key = crypt::Key::parse(&key)?;
+            let key = key
+                .filter(|k| !k.is_empty())
+                .map(|k| crypt::Key::parse(&k))
+                .transpose()?;
             let out = out.or(config.fetch.out).unwrap_or_else(|| ".".into());
-            client::run(ticket, out, key).await
+            client::run(ticket, out, key, &relay).await
         }
-        Command::Config { .. } | Command::Completions { .. } => unreachable!("handled above"),
+        Command::Config { .. } | Command::Completions { .. } | Command::Skill { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -164,6 +195,7 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
             }
             // Build the notifiers too, which checks their URLs.
             let notifiers = Notifiers::new(&c.serve.notify)?;
+            let relay = c.relay.to_mode().context("invalid [relay] settings")?;
             let or_default =
                 |v: Option<String>, d: &str| v.unwrap_or_else(|| format!("{d} (default)"));
             writeln!(o, "{} is valid\n", path.display())?;
@@ -216,9 +248,26 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
             )?;
             writeln!(
                 o,
+                "serve.encrypt        {}",
+                or_default(c.serve.encrypt.map(|b| b.to_string()), "false")
+            )?;
+            writeln!(
+                o,
+                "serve.hide_key       {}",
+                or_default(c.serve.hide_key.map(|b| b.to_string()), "false")
+            )?;
+            writeln!(
+                o,
                 "fetch.out            {}",
                 or_default(c.fetch.out.map(|d| d.display().to_string()), ".")
             )?;
+            let relay = match relay {
+                iroh::RelayMode::Custom(_) => format!("custom: {}", c.relay.urls.join(", ")),
+                iroh::RelayMode::Disabled => "disabled (direct connections only)".into(),
+                _ if c.relay.mode.is_some() => "n0's public relays".into(),
+                _ => "n0's public relays (default)".into(),
+            };
+            writeln!(o, "relay                {relay}")?;
             writeln!(o, "reset.token          {}", set(&c.reset.token))?;
         }
     }
@@ -232,18 +281,28 @@ fn completions(shell: clap_complete::Shell) -> Result<()> {
     write_stdout(&String::from_utf8(buf)?)
 }
 
-/// Show a ticket and its decryption key: readable on stderr, and as one
-/// `<ticket> <key>` line on stdout for scripts.
-pub fn print_ticket(ticket: &str, key: &str) -> Result<()> {
+/// Show a ticket and, if the data is encrypted, its decryption key:
+/// readable on stderr, and as one `<ticket>` or `<ticket> <key>` line on
+/// stdout for scripts.
+pub fn print_ticket(ticket: &str, key: Option<&str>) -> Result<()> {
+    ui::suspend(|| print_ticket_inner(ticket, key))
+}
+
+fn print_ticket_inner(ticket: &str, key: Option<&str>) -> Result<()> {
     eprintln!("on the client, run:");
     eprintln!();
     eprintln!("    deaddrop fetch {ticket}");
     eprintln!();
-    eprintln!("with this decryption key in DEADDROP_KEY (or --key):");
-    eprintln!();
-    eprintln!("    {key}");
-    eprintln!();
-    write_stdout(&format!("{ticket} {key}\n"))
+    match key {
+        Some(key) => {
+            eprintln!("with this decryption key in DEADDROP_KEY (or --key):");
+            eprintln!();
+            eprintln!("    {key}");
+            eprintln!();
+            write_stdout(&format!("{ticket} {key}\n"))
+        }
+        None => write_stdout(&format!("{ticket}\n")),
+    }
 }
 
 /// Write to stdout, treating a closed pipe (`deaddrop ... | head`) as success
