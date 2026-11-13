@@ -13,6 +13,12 @@
 # "warn" in debug builds.
 # log = "warn"
 
+# Progress bars on stderr. They're only drawn when stderr is a terminal (and
+# TERM isn't "dumb"); logs, pipes and files always get a plain progress line
+# every few seconds. false: always plain lines, e.g. when a terminal session
+# is recorded. --no-progress and DEADDROP_NO_PROGRESS override it.
+# progress = true
+
 [serve]
 # false (default): shut down after one client has downloaded the data.
 # true: keep serving to any number of clients until Ctrl-C.
@@ -35,9 +41,22 @@ multi_use = false
 # download, delete the data and wait for a reset to bring the next torrent.
 # wait_for_reset = false
 
+# Also age-encrypt the files before serving them, delete the plaintext, and
+# print a decryption key the client needs. Off by default: iroh already
+# encrypts the connection. Turn it on if the ticket alone shouldn't be enough
+# to read the data, or the plaintext shouldn't stay on disk while serving.
+# encrypt = false
+
+# Only with encrypt = true: never print the decryption key (stdout gets just
+# the ticket) and never send it back to `deaddrop reset`. The only copies go
+# to notifiers with include_key = true, and at least one is required. Keeps
+# the key out of terminals and logs. No effect without encrypt.
+# hide_key = false
+
 # Notifiers, sent when the ticket is ready. Add as many as you like.
 # Any --notify flag or DEADDROP_NOTIFY replaces this whole list.
-# include_key = true also sends the decryption key (default: ticket only).
+# With encrypt = true, include_key = true also sends the decryption key
+# (default: ticket only).
 [[serve.notify]]
 type = "discord"
 url = "https://discord.com/api/webhooks/<id>/<token>"
@@ -55,3 +74,13 @@ include_key = true
 # The server's reset token, used by `deaddrop reset`. --token and
 # DEADDROP_RESET_TOKEN override it.
 # token = "<long random string>"
+
+[relay]
+# Relay servers, used by serve, fetch and reset. iroh always tries a direct
+# (hole-punched) path; relays get the connection started and carry the data
+# if no direct path works. Each connection prints which path it uses.
+#   "default"  n0's public relays (the default)
+#   "custom"   only the relays in `urls`, e.g. your own iroh-relay
+#   "disabled" no relays: both sides must reach each other directly
+# mode = "default"
+# urls = ["https://relay.example.com"]   # setting urls implies mode = "custom"

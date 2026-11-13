@@ -25,9 +25,13 @@ pub struct Config {
     /// Log filter, same syntax as RUST_LOG (e.g. "off", "info", "deaddrop=debug").
     /// Defaults to "off" in release builds and "warn" in debug builds.
     pub log: Option<String>,
+    /// Draw progress bars on a terminal. Defaults to true; false prints plain
+    /// progress lines like when stderr isn't a terminal.
+    pub progress: Option<bool>,
     pub serve: ServeConfig,
     pub fetch: FetchConfig,
     pub reset: ResetConfig,
+    pub relay: RelaySettings,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -42,6 +46,11 @@ pub struct ServeConfig {
     pub reset_token: Option<String>,
     /// Single use: after the download, delete the data and wait for a reset.
     pub wait_for_reset: Option<bool>,
+    /// age-encrypt the files before serving them. Defaults to false.
+    pub encrypt: Option<bool>,
+    /// With encrypt: never print the key, only send it to notifiers with
+    /// include_key. Defaults to false.
+    pub hide_key: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -55,6 +64,67 @@ pub struct FetchConfig {
 pub struct ResetConfig {
     /// The server's reset token, used by `deaddrop reset`.
     pub token: Option<String>,
+}
+
+/// Relay servers, used by every command. Both ends of a transfer can use
+/// different settings; they only need to reach each other.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RelaySettings {
+    /// Defaults to `custom` if `urls` is set, `default` otherwise.
+    pub mode: Option<RelayModeName>,
+    /// Relay server URLs, for `mode = "custom"`.
+    pub urls: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RelayModeName {
+    /// n0's public relays.
+    Default,
+    /// Only the relays in `urls`.
+    Custom,
+    /// No relays: direct connections (including hole punching) only.
+    Disabled,
+}
+
+impl RelaySettings {
+    pub fn to_mode(&self) -> Result<iroh::RelayMode> {
+        use iroh::{RelayMode, RelayUrl};
+        let mode = self.mode.unwrap_or(if self.urls.is_empty() {
+            RelayModeName::Default
+        } else {
+            RelayModeName::Custom
+        });
+        match mode {
+            RelayModeName::Custom => {
+                anyhow::ensure!(
+                    !self.urls.is_empty(),
+                    "relay.mode = \"custom\" needs at least one URL in relay.urls"
+                );
+                let urls = self
+                    .urls
+                    .iter()
+                    .map(|u| {
+                        u.parse::<RelayUrl>()
+                            .with_context(|| format!("invalid relay URL {u:?}"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(RelayMode::Custom(urls.into_iter().collect()))
+            }
+            m => {
+                anyhow::ensure!(
+                    self.urls.is_empty(),
+                    "relay.urls is only used with relay.mode = \"custom\", not {:?}",
+                    format!("{m:?}").to_lowercase()
+                );
+                Ok(match m {
+                    RelayModeName::Disabled => RelayMode::Disabled,
+                    _ => RelayMode::Default,
+                })
+            }
+        }
+    }
 }
 
 /// The default config file location for this platform, if one can be found.
@@ -161,5 +231,22 @@ mod tests {
         assert!(parse("[[serve.notify]]\ntype = \"pigeon\"\nurl = \"https://x\"").is_err());
         assert!(parse("[[serve.notify]]\ntype = \"discord\"").is_err());
         assert!(parse("[serve]\npeers = [\"not-an-addr\"]").is_err());
+        assert!(parse("[relay]\nmode = \"sometimes\"").is_err());
+    }
+
+    #[test]
+    fn relay_modes() {
+        use iroh::RelayMode;
+        let mode = |s: &str| parse(s).unwrap().relay.to_mode();
+        assert_eq!(mode("").unwrap(), RelayMode::Default);
+        assert_eq!(
+            mode("[relay]\nmode = \"disabled\"").unwrap(),
+            RelayMode::Disabled
+        );
+        let custom = mode("[relay]\nurls = [\"https://relay.example.com\"]").unwrap();
+        assert!(matches!(custom, RelayMode::Custom(m) if m.len() == 1));
+        assert!(mode("[relay]\nmode = \"custom\"").is_err());
+        assert!(mode("[relay]\nmode = \"disabled\"\nurls = [\"https://r.example\"]").is_err());
+        assert!(mode("[relay]\nurls = [\"not a url\"]").is_err());
     }
 }

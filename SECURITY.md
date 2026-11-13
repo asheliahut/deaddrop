@@ -61,38 +61,51 @@ disclose.
 In scope are problems in deaddrop's own code that break what it promises.
 For example:
 
-- **Confidentiality:** recovering plaintext file contents, file names or the
-  torrent name without the key; the decryption key being written to the
-  server's disk or leaked to a notifier that doesn't have `include_key`.
+- **Confidentiality:** a party without the ticket (a relay, a network
+  observer) reading the data; with `--encrypt`, recovering plaintext file
+  contents, file names or the torrent name without the key, or the decryption
+  key being written to the server's disk, leaked to a notifier that doesn't
+  have `include_key`, or, with `--hide-key`, showing up in any output or reset
+  reply.
 - **Integrity:** `fetch` accepting tampered or wrong-key data, or writing a
   partial file under its real name.
 - **Client file system:** a malicious server making `fetch` write outside the
   output directory (path traversal, absolute paths, symlinks, ...).
 - **Seeding:** deaddrop uploading torrent piece data to the swarm, or
   accepting incoming BitTorrent connections.
-- **Single use:** a second client downloading from a single-use server, or an
-  old ticket still serving data after a reset.
+- **Single use:** a second client downloading from a single-use server, a
+  size probe being counted as the one download, or an old ticket still
+  serving data after a reset.
 - **Reset protocol:** resetting a server without the right token, bypassing
   the wrong-token delay, or a reset source being read as a path on the
   server's disk.
 - **Secrets in output:** webhook URLs or reset tokens showing up in logs,
   `deaddrop config check` or error messages.
+- **`deaddrop skill`:** writing outside the chosen skills directory, or
+  replacing or removing files it didn't write without `--force`.
 - Crashes or resource exhaustion that a remote peer can trigger cheaply.
 
 ### Out of scope
 
 These are known limits, documented in the [README](README.md#encryption):
 
+- Without `--encrypt` (the default), anyone holding the ticket can download
+  and read the data, and it is stored on the server's disk as plaintext while
+  it is served.
 - File sizes, file count, and the fact that a transfer happened are not
   hidden.
 - Plaintext exists on the server's disk while the torrent downloads, and
   deletion is not secure erasure (especially on SSDs).
-- The key appears on the server's stderr/stdout, so a persistent log of that
-  output (systemd journal, log files) contains it.
-- Anyone holding the ticket can download the ciphertext; anyone holding both
-  the ticket and the key can read it.
+- With `--encrypt` (and without `--hide-key`), the key appears on the server's stderr/stdout,
+  so a persistent log of that output (systemd journal, log files) contains it.
+- With `--encrypt`, anyone holding the ticket can download the ciphertext;
+  anyone holding both the ticket and the key can read it.
 - The BitTorrent swarm, trackers and DHT can see the server's IP address
   while it leeches.
+- Relay servers (n0's public ones by default) and the address lookup service
+  see which endpoints connect and their IP addresses, but never the data:
+  relays only forward end-to-end encrypted packets.
+- What an AI agent does with the instructions in the `deaddrop` skill.
 - Content legality, or what users choose to share.
 
 Bugs in dependencies (iroh, iroh-blobs, librqbit, age/rage, ...) should go to
@@ -101,12 +114,19 @@ exploitable, or ships a version with a known advisory, report it here.
 
 ## Hardening tips for users
 
-- Send the ticket and the key over different channels.
+- Treat the ticket as a secret: without `--encrypt` it is all anyone needs.
+- Use `--encrypt` when the server's disk or the channel the ticket travels
+  over isn't trusted, and send the ticket and the key over different
+  channels.
 - Prefer the config file (`chmod 600`) or environment variables over
   command-line flags for webhook URLs and reset tokens, to keep them out of
   shell history and `ps`.
 - Use a long random reset token, e.g. `openssl rand -hex 32`.
 - Only give `include_key` to notifiers you trust with the data.
+- With `--encrypt`, add `--hide-key` to keep the key out of the server's
+  terminal, logs and stdout entirely, so only your key notifiers have it.
+- Run your own iroh relay (`[relay] urls`) if connection metadata shouldn't
+  go through n0's public relays.
 - Verify release downloads against `SHA256SUMS`.
 - Installed with Homebrew? Run `brew upgrade deaddrop` to pick up security
   releases.

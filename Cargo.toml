@@ -1,10 +1,10 @@
 [package]
 name = "deaddrop"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.95"
 publish = false
-description = "Leech a torrent on a server without seeding, age-encrypt it, and hand it to one client peer-to-peer over iroh."
+description = "Leech a torrent on a server without seeding, and hand it to one client peer-to-peer over iroh, optionally age-encrypted."
 license = "Unlicense"
 homepage = "https://deaddrop.rip"
 repository = "https://github.com/asheliahut/deaddrop"
@@ -15,6 +15,7 @@ anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 clap_complete = "4.6.11"
 directories = "6"
+indicatif = "0.18.6"
 iroh = "1.4.1"
 iroh-blobs = "0.104.1"
 librqbit = { version = "9.1.0", default-features = false, features = ["rust-tls", "disable-upload"] }

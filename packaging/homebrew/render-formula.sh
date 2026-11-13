@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render the Homebrew formula for a release from its SHA256SUMS file.
 #
-#   packaging/homebrew/render-formula.sh v1.0.0 dist/SHA256SUMS > deaddrop.rb
+#   packaging/homebrew/render-formula.sh v2.0.0 dist/SHA256SUMS > deaddrop.rb
 #
 # Linux uses the static musl builds so the formula works on any distro.
 set -euo pipefail
@@ -24,7 +24,7 @@ sha() {
 
 cat <<EOF
 class Deaddrop < Formula
-  desc "Leech a torrent without seeding, age-encrypt it, and hand it off over iroh"
+  desc "Leech a torrent without seeding and hand it off peer-to-peer over iroh"
   homepage "https://deaddrop.rip"
   license "Unlicense"
 

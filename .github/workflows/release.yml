@@ -26,6 +26,8 @@ jobs:
             echo "::error::Tag v$tag does not match Cargo.toml version $crate"
             exit 1
           fi
+      - name: Check CHANGELOG.md has this release
+        run: packaging/changelog-section.sh "$GITHUB_REF_NAME" > /dev/null
 
   build:
     name: build ${{ matrix.target }}
@@ -76,7 +78,7 @@ jobs:
           name="$BIN-$GITHUB_REF_NAME-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/$BIN" "dist/$name/"
-          cp README.md config.example.toml "dist/$name/"
+          cp README.md CHANGELOG.md config.example.toml "dist/$name/"
           [ -f LICENSE ] && cp LICENSE* "dist/$name/" || true
           cd dist
           tar -czf "$name.tar.gz" "$name"
@@ -99,7 +101,7 @@ jobs:
           $name = "$env:BIN-$env:GITHUB_REF_NAME-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$env:BIN.exe" "dist/$name/"
-          Copy-Item README.md, config.example.toml "dist/$name/"
+          Copy-Item README.md, CHANGELOG.md, config.example.toml "dist/$name/"
           if (Test-Path LICENSE*) { Copy-Item LICENSE* "dist/$name/" }
           Set-Location dist
           Compress-Archive -Path $name -DestinationPath "$name.zip"
@@ -134,12 +136,16 @@ jobs:
       - name: Combined checksums
         run: cd dist && cat *.sha256 > SHA256SUMS
 
+      - name: Release notes from CHANGELOG.md
+        run: packaging/changelog-section.sh "$GITHUB_REF_NAME" > release-notes.md
+
       - name: Render Homebrew formula
         run: packaging/homebrew/render-formula.sh "$GITHUB_REF_NAME" dist/SHA256SUMS > dist/deaddrop.rb
 
       - uses: softprops/action-gh-release@v3.0.4
         with:
           files: dist/*
+          body_path: release-notes.md
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 
