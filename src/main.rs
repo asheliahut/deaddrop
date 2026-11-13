@@ -59,6 +59,11 @@ async fn main() -> Result<()> {
         .relay
         .to_mode()
         .context("invalid [relay] settings in the config file")?;
+    // --no-progress / DEADDROP_NO_PROGRESS > config `progress` > bars on a terminal.
+    ui::init(match cli.no_progress {
+        Some(no) => !no,
+        None => config.progress.unwrap_or(true),
+    });
 
     // RUST_LOG > config `log` > DEFAULT_LOG.
     let filter = match EnvFilter::try_from_default_env() {
@@ -71,6 +76,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .with_ansi(ui::stderr_colors())
         .init();
 
     match cli.command {
@@ -200,6 +206,11 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
                 |v: Option<String>, d: &str| v.unwrap_or_else(|| format!("{d} (default)"));
             writeln!(o, "{} is valid\n", path.display())?;
             writeln!(o, "log                  {}", or_default(c.log, DEFAULT_LOG))?;
+            writeln!(
+                o,
+                "progress             {}",
+                or_default(c.progress.map(|b| b.to_string()), "true")
+            )?;
             writeln!(
                 o,
                 "serve.multi_use      {}",

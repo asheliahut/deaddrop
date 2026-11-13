@@ -34,7 +34,9 @@ Examples:
   deaddrop fetch <ticket>                      Get the files
   deaddrop serve --encrypt ./file.torrent      Also age-encrypt; prints a key
   deaddrop reset <ticket> 'magnet:?xt=...'     Make a server serve another torrent
+  deaddrop serve x.torrent --no-progress       Plain progress lines on a terminal
   deaddrop config example > ~/.config/deaddrop/config.toml
+  deaddrop skill install                       Teach AI coding agents to use deaddrop
   source <(deaddrop completions zsh)           Tab completion for this shell
 
 Run `deaddrop help <command>` or `deaddrop <command> --help` for details.";
@@ -46,7 +48,9 @@ Examples:
   deaddrop fetch <ticket>                      Get the files
   deaddrop serve --encrypt ./file.torrent      Also age-encrypt; prints a key
   deaddrop reset <ticket> 'magnet:?xt=...'     Make a server serve another torrent
+  deaddrop serve x.torrent --no-progress       Plain progress lines on a terminal
   deaddrop config example > ~/.config/deaddrop/config.toml
+  deaddrop skill install                       Teach AI coding agents to use deaddrop
   source <(deaddrop completions zsh)           Tab completion for this shell
 
 Environment variables:
@@ -54,6 +58,8 @@ Environment variables:
   DEADDROP_KEY           Decryption key for `fetch` of --encrypt data (same as --key)
   DEADDROP_NOTIFY        Comma-separated notifiers for `serve` (same as --notify)
   DEADDROP_RESET_TOKEN   Reset token for `serve` (--reset-token) and `reset` (--token)
+  DEADDROP_NO_PROGRESS   `true`: plain progress lines, no bars (same as --no-progress)
+  NO_COLOR               Set: no colors in progress bars or log lines
   RUST_LOG               Log filter, e.g. `info` or `deaddrop=debug,librqbit=info`
                          (overrides `log` in the config file). `off` disables
                          logging. Default: off in release builds, warn in
@@ -70,7 +76,8 @@ Output:
   `deaddrop serve x.torrent > tickets.txt` followed by
   `read -r TICKET KEY < tickets.txt` works in scripts. After a reset, the
   server prints the new ticket as another line. On a terminal, progress bars
-  are drawn on stderr; otherwise progress is a plain line every few seconds.
+  are drawn on stderr; otherwise (or with --no-progress, or TERM=dumb)
+  progress is a plain line every few seconds.
 
 Exit status:
   0 on success (including a single-use server shutting down after its
@@ -285,6 +292,25 @@ pub struct Cli {
         value_hint = ValueHint::FilePath
     )]
     pub config: Option<PathBuf>,
+
+    /// Print plain progress lines instead of progress bars [config: progress]
+    ///
+    /// Bars are only drawn when stderr is a terminal (and TERM isn't `dumb`),
+    /// so logs, pipes and `2> file` already get plain lines. Use this when a
+    /// terminal is being recorded anyway (`script`, tmux/screen logging, a CI
+    /// runner with a pseudo-terminal). `--no-progress=false` turns bars back
+    /// on if the config file turns them off.
+    #[arg(
+        long,
+        global = true,
+        env = "DEADDROP_NO_PROGRESS",
+        hide_env_values = true,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "BOOL"
+    )]
+    pub no_progress: Option<bool>,
 
     #[command(subcommand)]
     pub command: Command,

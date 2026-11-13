@@ -25,6 +25,9 @@ pub struct Config {
     /// Log filter, same syntax as RUST_LOG (e.g. "off", "info", "deaddrop=debug").
     /// Defaults to "off" in release builds and "warn" in debug builds.
     pub log: Option<String>,
+    /// Draw progress bars on a terminal. Defaults to true; false prints plain
+    /// progress lines like when stderr isn't a terminal.
+    pub progress: Option<bool>,
     pub serve: ServeConfig,
     pub fetch: FetchConfig,
     pub reset: ResetConfig,

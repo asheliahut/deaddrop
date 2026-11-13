@@ -86,14 +86,25 @@ All notable changes to deaddrop. The format follows
 - **Plain progress output when stderr isn't a terminal** (logs, systemd,
   pipes): no bars, just a progress line every few seconds and a summary at
   the end. The torrent progress line keeps its 1.0 format.
+- **`--no-progress` / `DEADDROP_NO_PROGRESS` / `progress = false`** force
+  plain progress lines even on a terminal, for recorded sessions (`script`,
+  tmux logging, CI pseudo-terminals). `TERM=dumb` does the same.
+- **Log lines have no color codes unless stderr is a terminal.** 1.0 colored
+  `tracing` log lines even when written to a file or pipe. Colors now follow
+  `NO_COLOR`, `CLICOLOR=0`, `CLICOLOR_FORCE` and `TERM=dumb`, like the
+  progress bars.
 - **Single-use gate:** size-probe requests are answered but never count as
   the one download.
 - Notifiers send the decryption key only when the data is encrypted, and only
   to notifiers with `include_key`. Without `--encrypt`, every notifier gets
   just the ticket.
-- The package description, `--help` text, README, `SECURITY.md` and
-  `config.example.toml` now describe age encryption as an optional extra
-  layer, and document `--hide-key`, `[relay]` and progress output.
+- **Docs:**
+  - The package description, `--help` text, README, `SECURITY.md` and
+    `config.example.toml` describe age encryption as an optional extra layer.
+  - They document `--hide-key`, `[relay]`, connection paths, progress output,
+    `--no-progress` and `deaddrop skill`, and `--help` has examples for them.
+  - `SECURITY.md` now covers size probes, `deaddrop skill`, what relays can
+    see, and hardening tips for `--hide-key` and running your own relay.
 - **Releases:** GitHub release notes now come from this changelog (the tag's
   section must exist, or the release fails early). Release archives include
   `CHANGELOG.md`. The Homebrew formula's description no longer says the data

@@ -3,12 +3,13 @@
 //! All bars live in one [`MultiProgress`], so several can run at once (the
 //! torrent download, one per client transfer). Status lines go through
 //! `say!` so they print above the bars instead of tearing
-//! them. When stderr isn't a terminal there are no bars: callers print
-//! plain lines instead (see [`bars`]).
+//! them. Without bars (stderr isn't a terminal, `TERM=dumb`, or
+//! `--no-progress` / `progress = false`), callers print plain lines instead
+//! (see [`bars`]).
 
 use std::{
     io::IsTerminal,
-    sync::LazyLock,
+    sync::{LazyLock, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -17,11 +18,38 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::torrent::human;
 
 static MULTI: LazyLock<MultiProgress> = LazyLock::new(MultiProgress::new);
-static BARS: LazyLock<bool> = LazyLock::new(|| std::io::stderr().is_terminal());
+static BARS: OnceLock<bool> = OnceLock::new();
 
-/// Whether progress bars are shown (stderr is a terminal).
+/// Decide once whether to draw progress bars. `enabled` is false with
+/// `--no-progress` or `progress = false`; bars also need stderr to be a
+/// capable terminal. Call before anything is printed.
+pub fn init(enabled: bool) {
+    BARS.set(enabled && capable_terminal()).ok();
+}
+
+/// Whether progress bars are shown.
 pub fn bars() -> bool {
-    *BARS
+    *BARS.get_or_init(capable_terminal)
+}
+
+/// stderr is a terminal that can redraw lines (not `TERM=dumb`).
+fn capable_terminal() -> bool {
+    std::io::stderr().is_terminal() && std::env::var("TERM").map_or(true, |t| t != "dumb")
+}
+
+/// Whether to color log lines on stderr. Follows the same rules as the
+/// progress bars' colors: `NO_COLOR` and `CLICOLOR=0` turn colors off,
+/// `CLICOLOR_FORCE` forces them on, and otherwise only a capable terminal
+/// gets them.
+pub fn stderr_colors() -> bool {
+    let var = |k: &str| std::env::var(k).ok();
+    if var("CLICOLOR_FORCE").is_some_and(|v| v != "0") {
+        return true;
+    }
+    if var("NO_COLOR").is_some_and(|v| !v.is_empty()) || var("CLICOLOR").as_deref() == Some("0") {
+        return false;
+    }
+    capable_terminal()
 }
 
 /// Print a status line on stderr, above any progress bars.

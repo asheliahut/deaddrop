@@ -23,6 +23,7 @@
 [Config](#config-file) •
 [Notifications](#notifications) •
 [Encryption](#encryption) •
+[Agent skill](#agent-skill-for-ai-coding-agents) •
 [Contributing](#-contributing)
 
 </div>
@@ -52,7 +53,10 @@ flowchart LR
 - 💥 **Single use by default** – one client, one download, then the server shuts down (or wipes the data and waits).
 - 🔄 **Hot swaps** – point a running server at a new torrent with `deaddrop reset`; the old ticket dies.
 - 🔔 **Notifications** – push tickets to Discord or any webhook, with per-notifier control over who gets the key.
-- 🧩 **Script friendly** – the ticket (and key, with `--encrypt`) on stdout, everything else on stderr, TOML config, shell completions.
+- 🧭 **See the path** – every connection reports whether it goes direct (hole-punched) or through a relay; use n0's relays, your own, or none.
+- 📊 **Progress bars** – for the torrent, each transfer on the server, and the client download, with plain lines for logs, pipes and `--no-progress`.
+- 🧩 **Script friendly** – the ticket (and key, with `--encrypt`, unless `--hide-key`) on stdout, everything else on stderr, TOML config, shell completions.
+- 🤖 **Agent ready** – `deaddrop skill install` teaches Claude Code, Codex, GitHub Copilot and other AI coding agents how to use and configure deaddrop.
 
 ## 🚀 Quick start
 
@@ -170,6 +174,7 @@ See [Encryption](#encryption) for what is protected and from whom.
 | `--encrypt` | Also age-encrypt the files before serving them, delete the plaintext, and print a decryption key. Off by default, since iroh already encrypts the connection. See [Encryption](#encryption). |
 | `--hide-key` | Only with `--encrypt`: never print the decryption key; send it only to notifiers with `include_key` (at least one is required). See [Encryption](#encryption). |
 | `-c, --config <FILE>` | TOML config file (works with every command). See [Config file](#config-file). |
+| `--no-progress` | Plain progress lines instead of progress bars (works with every command). See [Progress](#progress). |
 
 `fetch` takes `-o/--out <DIR>` (default: the current directory) and, for
 data served with `--encrypt`, the key in `DEADDROP_KEY` or `--key`.
@@ -292,7 +297,7 @@ Each ticket goes to stdout as one line, `<ticket>` or, with `--encrypt`,
 `<ticket> <key>`. Everything else goes to stderr. So
 `deaddrop serve x.torrent > tickets.txt` and then
 `read -r TICKET KEY < tickets.txt` works in scripts (`KEY` is empty without
-`--encrypt`). After a [reset](#resetting-a-server), the new ticket is printed
+`--encrypt`, or with `--hide-key`). After a [reset](#resetting-a-server), the new ticket is printed
 as another line.
 
 ### Logging
@@ -302,7 +307,8 @@ log warnings. Set `RUST_LOG` (e.g. `RUST_LOG=info`) or `log` in the
 [config file](#config-file) to change that, or `off` to turn logging off in
 any build. This only covers the log output from deaddrop and its libraries.
 The status lines (progress, the ticket, reset messages) are always printed to
-stderr.
+stderr. Log lines are only colored on a terminal; `NO_COLOR` or `TERM=dumb`
+turn colors off there too, so log files never get escape codes.
 
 ### Progress
 
@@ -316,7 +322,17 @@ On a terminal, deaddrop shows progress bars on stderr:
   the download and refuse the real one.
 
 When stderr isn't a terminal (a log file, systemd, a pipe), there are no bars,
-just a plain progress line every few seconds.
+just a plain progress line every few seconds and a summary at the end, with no
+escape codes. That's also what you get with:
+
+- `--no-progress` (any command), or `DEADDROP_NO_PROGRESS=true`, or
+  `progress = false` in the config file. Use it when a terminal session is
+  recorded anyway: `script`, tmux or screen logging, a CI runner that gives
+  jobs a pseudo-terminal. `--no-progress=false` turns bars back on.
+- `TERM=dumb`, which turns off colors too.
+
+`NO_COLOR` (or `CLICOLOR=0`) turns off colors in progress bars and log lines;
+`CLICOLOR_FORCE=1` forces them on.
 
 ## Config file
 
@@ -564,6 +580,7 @@ two files of work.
 - [iroh](https://iroh.computer) and [iroh-blobs](https://github.com/n0-computer/iroh-blobs): P2P QUIC transport and verified blob transfer
 - [librqbit](https://github.com/ikatson/rqbit): the BitTorrent engine
 - [age](https://github.com/str4d/rage): optional file encryption
+- [indicatif](https://github.com/console-rs/indicatif): progress bars
 - [clap](https://github.com/clap-rs/clap), [tokio](https://tokio.rs), and the rest of the Rust ecosystem
 
 ## 📜 License

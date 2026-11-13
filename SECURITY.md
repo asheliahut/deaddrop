@@ -73,13 +73,16 @@ For example:
   output directory (path traversal, absolute paths, symlinks, ...).
 - **Seeding:** deaddrop uploading torrent piece data to the swarm, or
   accepting incoming BitTorrent connections.
-- **Single use:** a second client downloading from a single-use server, or an
-  old ticket still serving data after a reset.
+- **Single use:** a second client downloading from a single-use server, a
+  size probe being counted as the one download, or an old ticket still
+  serving data after a reset.
 - **Reset protocol:** resetting a server without the right token, bypassing
   the wrong-token delay, or a reset source being read as a path on the
   server's disk.
 - **Secrets in output:** webhook URLs or reset tokens showing up in logs,
   `deaddrop config check` or error messages.
+- **`deaddrop skill`:** writing outside the chosen skills directory, or
+  replacing or removing files it didn't write without `--force`.
 - Crashes or resource exhaustion that a remote peer can trigger cheaply.
 
 ### Out of scope
@@ -99,6 +102,10 @@ These are known limits, documented in the [README](README.md#encryption):
   anyone holding both the ticket and the key can read it.
 - The BitTorrent swarm, trackers and DHT can see the server's IP address
   while it leeches.
+- Relay servers (n0's public ones by default) and the address lookup service
+  see which endpoints connect and their IP addresses, but never the data:
+  relays only forward end-to-end encrypted packets.
+- What an AI agent does with the instructions in the `deaddrop` skill.
 - Content legality, or what users choose to share.
 
 Bugs in dependencies (iroh, iroh-blobs, librqbit, age/rage, ...) should go to
@@ -116,6 +123,10 @@ exploitable, or ships a version with a known advisory, report it here.
   shell history and `ps`.
 - Use a long random reset token, e.g. `openssl rand -hex 32`.
 - Only give `include_key` to notifiers you trust with the data.
+- With `--encrypt`, add `--hide-key` to keep the key out of the server's
+  terminal, logs and stdout entirely, so only your key notifiers have it.
+- Run your own iroh relay (`[relay] urls`) if connection metadata shouldn't
+  go through n0's public relays.
 - Verify release downloads against `SHA256SUMS`.
 - Installed with Homebrew? Run `brew upgrade deaddrop` to pick up security
   releases.

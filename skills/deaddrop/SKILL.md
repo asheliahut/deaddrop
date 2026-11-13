@@ -117,7 +117,9 @@ DEADDROP_KEY="$KEY" deaddrop fetch "$TICKET" -o ./downloads   # data served with
 - Exit 0 on success, including a single-use server shutting down after its
   download and Ctrl-C. Exit 1 on error, 2 on bad usage.
 - When stderr isn't a terminal (as for most agents), progress is a plain line
-  every few seconds instead of progress bars.
+  every few seconds instead of progress bars. If you run deaddrop in a
+  pseudo-terminal and capture its output, pass `--no-progress` (or set
+  `DEADDROP_NO_PROGRESS=true`) to get the same plain lines.
 - Lines like `connection to <id> using a direct path (...)` or `... the relay
   <url>` show how the two sides are connected. Relay-only transfers work but
   are slower.

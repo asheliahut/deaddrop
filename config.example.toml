@@ -13,6 +13,12 @@
 # "warn" in debug builds.
 # log = "warn"
 
+# Progress bars on stderr. They're only drawn when stderr is a terminal (and
+# TERM isn't "dumb"); logs, pipes and files always get a plain progress line
+# every few seconds. false: always plain lines, e.g. when a terminal session
+# is recorded. --no-progress and DEADDROP_NO_PROGRESS override it.
+# progress = true
+
 [serve]
 # false (default): shut down after one client has downloaded the data.
 # true: keep serving to any number of clients until Ctrl-C.
