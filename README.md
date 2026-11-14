@@ -165,8 +165,8 @@ See [Encryption](#encryption) for what is protected and from whom.
 
 | Flag | Meaning |
 | --- | --- |
-| `--multi-use` | Keep serving to any number of clients until Ctrl-C. Without this flag the server is **single use**: it serves one client, then shuts down (or, with `--wait-for-reset`, deletes the data and waits) once that client has the whole collection and disconnects (or 30 s after the transfer completes). While that client is connected, other clients are rejected. If the client drops out before finishing, the next client can connect. `--multi-use=false` forces single use even if the config file turns multi-use on. |
-| `--data-dir <DIR>` | Keep the torrent data and blob store here. If you leave this out, deaddrop uses a temp directory and deletes it on exit. |
+| `--multi-use` | Keep serving to any number of clients until Ctrl-C. Without this flag the server is **single use**: it serves one client, then deletes the data and shuts down (or, with `--wait-for-reset`, waits) once that client has the whole collection and disconnects (or 30 s after the transfer completes). While that client is connected, other clients are rejected. If the client drops out before finishing, the next client can connect. `--multi-use=false` forces single use even if the config file turns multi-use on. |
+| `--data-dir <DIR>` | Keep the torrent data and blob store here. If you leave this out, deaddrop uses a temp directory and deletes it on exit. A single-use server deletes the data once its one download is done, even from a data dir; a multi-use server's data stays until a reset replaces it. |
 | `--peer <IP:PORT>` | Extra BitTorrent peer to connect to. Repeatable. Useful for private swarms. |
 | `--notify <TYPE=URL>` | Send the ticket somewhere when it's ready. Repeatable. See [Notifications](#notifications). |
 | `--reset-token <TOKEN>` | Let `deaddrop reset` switch the server to a different torrent. See [Resetting a server](#resetting-a-server). Prefer `DEADDROP_RESET_TOKEN` or the config file. |
@@ -178,6 +178,16 @@ See [Encryption](#encryption) for what is protected and from whom.
 
 `fetch` takes `-o/--out <DIR>` (default: the current directory) and, for
 data served with `--encrypt`, the key in `DEADDROP_KEY` or `--key`.
+
+If the connection drops mid-download, `fetch` reconnects by itself and only
+downloads what is still missing. It keeps trying for `--retry-for <SECS>`
+(default 120, `0` to give up at once) without progress. If it gives up or you
+stop it, the partial download stays in `.deaddrop-<hash>` in the output
+folder, and running the same command again resumes from there. A single-use
+server lets a client continue as long as its download hasn't finished. After
+a hard disconnect (the client crashed or lost its network), the server can
+take up to about 30 s to notice and free its slot; until then reconnects are
+refused and `fetch` just keeps retrying.
 
 ### Resetting a server
 
@@ -371,6 +381,7 @@ include_key = true                # this one also gets the key (default: false)
 
 [fetch]
 out = "/home/me/Downloads"
+# retry_for = 120                 # seconds to keep reconnecting without progress
 
 [reset]
 # token = "<long random string>"           # used by `deaddrop reset`
@@ -543,7 +554,8 @@ relays disabled on the server, the ticket has only direct addresses.
   different channels when you can.
 - If `fetch` of encrypted data is run without the key, the download is kept
   in `.deaddrop-<hash>` in the output folder, so running it again with the
-  key works even after a single-use server has shut down.
+  key works even after a single-use server has shut down. An interrupted
+  download is kept there too, and running `fetch` again resumes it.
 
 ## Testing locally
 

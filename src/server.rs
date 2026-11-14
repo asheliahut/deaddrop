@@ -112,6 +112,8 @@ struct PendingReset<'a> {
     reply: oneshot::Sender<Result<reset::NewTicket, String>>,
     _busy: reset::BusyGuard,
     work: BoxFuture<'a, Result<Served>>,
+    /// Where the new torrent is downloading, to clean up if the server exits.
+    dir: PathBuf,
 }
 
 async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Result<()> {
@@ -165,6 +167,8 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
 
     let mut generation = 0u64;
     let mut pending: Option<PendingReset> = None;
+    // Set when a single-use download finished and the server exits.
+    let mut finished = false;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -176,12 +180,15 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
                 if current.as_ref().map(|c| c.root.hash()) != Some(root) {
                     continue;
                 }
-                if !opts.wait_for_reset {
-                    say!("single-use download finished, shutting down");
-                    break;
-                }
                 gate.set_root(None);
                 let old = current.take().expect("checked above");
+                if !opts.wait_for_reset {
+                    // The data is no longer needed, even in a kept data dir.
+                    say!("single-use download finished; deleting the data and shutting down");
+                    retire(old, gate.clone()).await;
+                    finished = true;
+                    break;
+                }
                 say!("single-use download finished; deleting the data and waiting for a reset");
                 say!("to serve something else: deaddrop reset {ticket} <source>");
                 tokio::spawn(retire(old, gate.clone()));
@@ -198,7 +205,8 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
                 pending = Some(PendingReset {
                     reply,
                     _busy: busy,
-                    work: Box::pin(prepare_reset(&store, source, dir, &opts.peers, encrypt)),
+                    work: Box::pin(prepare_reset(&store, source, dir.clone(), &opts.peers, encrypt)),
+                    dir,
                 });
             }
             res = async { pending.as_mut().expect("guarded").work.as_mut().await }, if pending.is_some() => {
@@ -233,10 +241,20 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
         }
     }
 
-    drop(pending);
+    // A half-done reset would never be served; don't leave it on disk.
+    if let Some(p) = pending.take() {
+        drop(p.work);
+        remove_dir(&p.dir).await;
+    }
     router.shutdown().await.ok();
     drop(current);
     store.shutdown().await.ok();
+    if finished {
+        // GC never got to run on the retired collection, and the store keeps
+        // small files (and the encrypted manifest) inline in its database.
+        // Nothing in it is served any more, so remove it too.
+        remove_dir(&store_dir).await;
+    }
     Ok(())
 }
 

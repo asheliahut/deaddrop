@@ -57,6 +57,8 @@ pub struct ServeConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct FetchConfig {
     pub out: Option<PathBuf>,
+    /// Seconds to keep reconnecting without progress. Defaults to 120.
+    pub retry_for: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]

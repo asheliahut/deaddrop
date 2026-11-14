@@ -4,6 +4,29 @@ All notable changes to deaddrop. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **A single-use server deletes the data when its download is done**, also
+  from a `--data-dir` and also without `--wait-for-reset`. Before, it only
+  shut down, and the files (plaintext, or the encrypted copies with
+  `--encrypt`) and blob store stayed in a `--data-dir`. A multi-use server
+  still keeps its data until a reset replaces it or, with a `--data-dir`,
+  after exit.
+- A reset that is still downloading when the server exits is deleted instead
+  of left half-done in the data dir.
+
+### Added
+
+- **`fetch` resumes interrupted downloads.** If the connection drops, it
+  reconnects and downloads only what is missing, for up to `--retry-for`
+  seconds (`fetch.retry_for`, default 120) without progress. If it gives up
+  or is stopped, the partial download is kept in `.deaddrop-<hash>`, and
+  running the same command again picks up where it left off. Before, a
+  failed download was thrown away. A single-use server already let a client
+  that dropped out before finishing connect again.
+
 ## [2.0.0] - 2026-11-13
 
 ### Breaking

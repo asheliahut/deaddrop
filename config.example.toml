@@ -25,7 +25,8 @@
 multi_use = false
 
 # Where the torrent data and blob store go. If unset, a temp dir is used and
-# deleted on exit.
+# deleted on exit. A single-use server deletes the data from here too once its
+# one download is done; a multi-use server leaves it until a reset.
 # data_dir = "/var/lib/deaddrop"
 
 # Extra BitTorrent peers to connect to.
@@ -69,6 +70,10 @@ include_key = true
 [fetch]
 # Where `deaddrop fetch` writes files. Default: the current directory.
 # out = "/home/me/Downloads"
+
+# If the connection drops, keep reconnecting (and resuming) for this many
+# seconds without progress. 0 gives up on the first failure. Default: 120.
+# retry_for = 120
 
 [reset]
 # The server's reset token, used by `deaddrop reset`. --token and

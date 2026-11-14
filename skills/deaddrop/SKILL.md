@@ -53,8 +53,9 @@ deaddrop serve 'magnet:?xt=urn:btih:...' > ticket.txt
   In scripts: `read -r TICKET KEY < ticket.txt`.
 - **Single use is the default:** the server exits after one client has
   downloaded everything. `--multi-use` keeps it serving until Ctrl-C.
-- `--data-dir <DIR>` keeps the data; without it a temporary dir is used and
-  deleted on exit.
+- `--data-dir <DIR>` keeps the data of a multi-use server after exit; without
+  it a temporary dir is used and deleted on exit. A single-use server deletes
+  the data once its one download is done, even from a data dir.
 - `--peer <IP:PORT>` (repeatable) adds BitTorrent peers when DHT and trackers
   can't find any.
 
@@ -107,6 +108,13 @@ DEADDROP_KEY="$KEY" deaddrop fetch "$TICKET" -o ./downloads   # data served with
 - `fetch` checks the size first, then downloads into
   `.deaddrop-<hash>/` inside the output dir, writes the files, and deletes the
   temp folder.
+- If the connection drops, `fetch` reconnects and resumes on its own for up to
+  `--retry-for` seconds (default 120) without progress. If it still fails,
+  the partial download is kept; **rerun the same command to resume**. Don't
+  delete `.deaddrop-<hash>/` unless the user wants to give up. A refusal
+  ("permission") can mean the single-use server's one download already
+  finished, another client holds the slot, or the server was reset (the
+  ticket is stale).
 - If the data is encrypted and no key was given, it stops with an error but
   **keeps the download**. Rerunning with the key finishes without the server,
   even after a single-use server has exited.

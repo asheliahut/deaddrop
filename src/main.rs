@@ -15,6 +15,8 @@ mod server;
 mod skill;
 mod torrent;
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
@@ -31,6 +33,9 @@ const DEFAULT_LOG: &str = if cfg!(debug_assertions) {
 } else {
     "off"
 };
+
+/// How long `fetch` keeps reconnecting without progress, in seconds.
+const DEFAULT_RETRY_FOR: u64 = 120;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -131,13 +136,21 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        Command::Fetch { ticket, out, key } => {
+        Command::Fetch {
+            ticket,
+            out,
+            key,
+            retry_for,
+        } => {
             let key = key
                 .filter(|k| !k.is_empty())
                 .map(|k| crypt::Key::parse(&k))
                 .transpose()?;
             let out = out.or(config.fetch.out).unwrap_or_else(|| ".".into());
-            client::run(ticket, out, key, &relay).await
+            let retry_for = retry_for
+                .or(config.fetch.retry_for)
+                .unwrap_or(DEFAULT_RETRY_FOR);
+            client::run(ticket, out, key, &relay, Duration::from_secs(retry_for)).await
         }
         Command::Config { .. } | Command::Completions { .. } | Command::Skill { .. } => {
             unreachable!("handled above")
@@ -271,6 +284,14 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
                 o,
                 "fetch.out            {}",
                 or_default(c.fetch.out.map(|d| d.display().to_string()), ".")
+            )?;
+            writeln!(
+                o,
+                "fetch.retry_for      {}",
+                or_default(
+                    c.fetch.retry_for.map(|s| s.to_string()),
+                    &DEFAULT_RETRY_FOR.to_string()
+                )
             )?;
             let relay = match relay {
                 iroh::RelayMode::Custom(_) => format!("custom: {}", c.relay.urls.join(", ")),

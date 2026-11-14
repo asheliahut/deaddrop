@@ -21,7 +21,8 @@ A dead drop in two steps:
      fallback), downloads the files, and checks every chunk against its
      BLAKE3 hash.
 
-By default the server is single use: it shuts down once one client has the data.
+By default the server is single use: it deletes the data and shuts down once
+one client has it.
 
 With `serve --encrypt`, the files are also age-encrypted on the server (the
 plaintext is deleted) and a decryption key is printed, which the client
@@ -165,6 +166,13 @@ folder. The files are then written out under their original names, and the
 temporary folder is deleted. Tampered data is an error, and no partial file
 is left under the real name. File names that are absolute or contain `..`
 are refused.
+
+If the connection drops, the client reconnects and downloads only what is
+still missing, for up to --retry-for seconds (default 120) without progress.
+If it gives up, or is stopped, the partial download is kept in the temporary
+folder, and running the same command again resumes it. A single-use server
+lets the same or another client continue, as long as the download hasn't
+finished yet.
 
 If the server used --encrypt, the files are decrypted with the key
 (DEADDROP_KEY or --key); a wrong key is an error. Without the key, the
@@ -342,7 +350,9 @@ pub enum Command {
         /// Keep torrent data and the blob store here [config: serve.data_dir]
         ///
         /// If you leave this out, deaddrop uses a temporary directory and deletes
-        /// it on exit. With a data dir, the data stays after exit.
+        /// it on exit. With a data dir, a multi-use server's data stays after
+        /// exit; a single-use server always deletes the data once its one
+        /// download is done.
         #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         data_dir: Option<PathBuf>,
 
@@ -448,6 +458,12 @@ pub enum Command {
             hide_env_values = true
         )]
         key: Option<String>,
+
+        /// Keep reconnecting for this many seconds without progress after the connection drops [default: 120] [config: fetch.retry_for]
+        ///
+        /// Each attempt only downloads what is still missing. 0 gives up on the first failure.
+        #[arg(long, value_name = "SECS")]
+        retry_for: Option<u64>,
     },
 
     /// Make a server serve a different torrent

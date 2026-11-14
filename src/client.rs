@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use iroh::{Endpoint, RelayMode};
+use iroh::{Endpoint, RelayMode, endpoint::Connection};
 use iroh_blobs::{
     BlobFormat, Hash, api::remote::GetProgressItem, format::collection::Collection,
     get::request::get_hash_seq_and_sizes, store::fs::FsStore, ticket::BlobTicket,
@@ -22,11 +22,21 @@ use crate::{
 /// allows about a million files.
 const MAX_HASH_SEQ_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Why a download can keep failing, shown when the client gives up.
+const GAVE_UP: &str = "the download did not finish. If the server refused it \
+    (\"permission\"): another client may be downloading from this single-use server, \
+    its one download may be done already, or it was reset to a different torrent and \
+    this ticket no longer works";
+
+/// Longest wait between two reconnect attempts.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
+
 pub async fn run(
     ticket: BlobTicket,
     out: PathBuf,
     key: Option<Key>,
     relay: &RelayMode,
+    retry_for: Duration,
 ) -> Result<()> {
     ensure!(
         ticket.format() == BlobFormat::HashSeq,
@@ -37,12 +47,20 @@ pub async fn run(
     // Download into a temporary store inside the output directory, write
     // (and if needed decrypt) the files out of it, then delete it.
     let store_dir = out.join(format!(".deaddrop-{}", ticket.hash().fmt_short()));
-    let res = fetch(&ticket, &out, &store_dir, key.as_ref(), relay).await;
-    // Without the key, keep the download: the server may be single use, and
-    // a rerun with the key can then finish without it.
-    let keep = res.as_ref().is_err_and(|e| e.is::<NeedKey>());
-    if !keep {
-        tokio::fs::remove_dir_all(&store_dir).await.ok();
+    let res = fetch(&ticket, &out, &store_dir, key.as_ref(), relay, retry_for).await;
+    match &res {
+        Ok(()) => {
+            tokio::fs::remove_dir_all(&store_dir).await.ok();
+        }
+        // Keep whatever was downloaded: the server may be single use, and a
+        // rerun of the same command only fetches what is missing (or, if it
+        // is all there, doesn't contact the server). NeedKey already says so.
+        Err(e) if !e.is::<NeedKey>() && store_dir.exists() => say!(
+            "the partial download is kept in {}; run the same command again to resume \
+             (or delete that folder to give up)",
+            store_dir.display()
+        ),
+        Err(_) => {}
     }
     res
 }
@@ -69,6 +87,7 @@ async fn fetch(
     store_dir: &Path,
     key: Option<&Key>,
     relay: &RelayMode,
+    retry_for: Duration,
 ) -> Result<()> {
     let store = FsStore::load(store_dir).await?;
     let res = async {
@@ -78,9 +97,7 @@ async fn fetch(
             say!("already downloaded; not contacting the server");
         } else {
             let endpoint = crate::net::bind(relay).await?;
-            let res = download(&endpoint, &store, ticket).await;
-            // Close cleanly on errors too, so a single-use server frees its
-            // slot right away instead of waiting for the connection to time out.
+            let res = download_with_retries(&endpoint, &store, ticket, retry_for).await;
             endpoint.close().await;
             res?;
         }
@@ -91,17 +108,82 @@ async fn fetch(
     res
 }
 
+/// Bytes of the collection already in the local store.
+async fn local_bytes(store: &FsStore, ticket: &BlobTicket) -> u64 {
+    match store.remote().local(ticket.hash_and_format()).await {
+        Ok(local) => local.local_bytes(),
+        Err(_) => 0,
+    }
+}
+
+/// Download, reconnecting after a failure until `retry_for` has passed
+/// without any progress. Each attempt only fetches what is still missing.
+///
+/// A dropped connection frees a single-use server's slot only once the
+/// server notices, which can take up to iroh's idle timeout (about 30 s), so
+/// the first reconnects may be refused; they just count as attempts without
+/// progress.
+async fn download_with_retries(
+    endpoint: &Endpoint,
+    store: &FsStore,
+    ticket: &BlobTicket,
+    retry_for: Duration,
+) -> Result<()> {
+    let mut have = local_bytes(store, ticket).await;
+    if have > 0 {
+        say!("resuming: {} already downloaded", human(have));
+    }
+    let mut last_progress = Instant::now();
+    let mut delay = Duration::from_secs(1);
+    loop {
+        let err = match download(endpoint, store, ticket).await {
+            Ok(()) => return Ok(()),
+            Err(e) => e,
+        };
+        let now_have = local_bytes(store, ticket).await;
+        if now_have > have {
+            have = now_have;
+            last_progress = Instant::now();
+            delay = Duration::from_secs(1);
+        }
+        if last_progress.elapsed() + delay > retry_for {
+            return Err(err.context(GAVE_UP));
+        }
+        say!("{err:#}");
+        say!(
+            "retrying in {}s; the {} downloaded so far is kept",
+            delay.as_secs(),
+            human(have)
+        );
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(MAX_RETRY_DELAY);
+    }
+}
+
 async fn download(endpoint: &Endpoint, store: &FsStore, ticket: &BlobTicket) -> Result<()> {
     say!("connecting to {}", ticket.addr().id);
     let conn = endpoint
         .connect(ticket.addr().clone(), iroh_blobs::ALPN)
         .await
         .context("failed to connect to the server")?;
+    let res = transfer(&conn, store, ticket).await;
+    // Close right away, on errors too, so a single-use server frees its slot
+    // (for our next attempt) instead of waiting for the connection to time out.
+    match &res {
+        Ok(()) => conn.close(0u32.into(), b"done"),
+        Err(_) => conn.close(1u32.into(), b"failed"),
+    }
+    res
+}
+
+async fn transfer(conn: &Connection, store: &FsStore, ticket: &BlobTicket) -> Result<()> {
+    // What an earlier, interrupted attempt already downloaded. The fetch
+    // below only asks for the rest, and reports progress from zero.
+    let resumed = local_bytes(store, ticket).await;
 
     // Ask for the size first, so the bar can show a total and ETA. Not
     // fatal: without it the bar just has no total.
-    let total = match get_hash_seq_and_sizes(&conn, &ticket.hash(), MAX_HASH_SEQ_BYTES, None).await
-    {
+    let total = match get_hash_seq_and_sizes(conn, &ticket.hash(), MAX_HASH_SEQ_BYTES, None).await {
         Ok((hash_seq, sizes)) => Some(hash_seq.len() as u64 * 32 + sizes.iter().sum::<u64>()),
         Err(e) => {
             tracing::debug!("size probe failed: {e}");
@@ -116,20 +198,23 @@ async fn download(endpoint: &Endpoint, store: &FsStore, ticket: &BlobTicket) -> 
         Some(t) if bar.is_none() => say!("downloading {}", human(t)),
         _ => {}
     }
+    if let Some(bar) = &bar {
+        bar.set_position(resumed);
+    }
     let mut stream = store
         .remote()
         .fetch(conn.clone(), ticket.hash_and_format())
         .stream();
     let stats = loop {
         match stream.next().await {
-            Some(GetProgressItem::Progress(n)) => match &bar {
-                Some(bar) => {
+            Some(GetProgressItem::Progress(n)) => match (&bar, resumed + n) {
+                (Some(bar), n) => {
                     if bar.length().is_some_and(|len| n > len) {
                         bar.set_length(n);
                     }
                     bar.set_position(n);
                 }
-                None if lines.due() => match total {
+                (None, n) if lines.due() => match total {
                     Some(t) => say!(
                         "downloaded {} / {} ({:.1}%)",
                         human(n),
@@ -138,7 +223,7 @@ async fn download(endpoint: &Endpoint, store: &FsStore, ticket: &BlobTicket) -> 
                     ),
                     None => say!("downloaded {}", human(n)),
                 },
-                None => {}
+                (None, _) => {}
             },
             Some(GetProgressItem::Done(stats)) => break stats,
             Some(GetProgressItem::Error(e)) => {
@@ -148,11 +233,7 @@ async fn download(endpoint: &Endpoint, store: &FsStore, ticket: &BlobTicket) -> 
                         format!("download failed after {}", human(bar.position())),
                     );
                 }
-                bail!(
-                    "download failed: {e}\n\
-                     (if the server was reset to a different torrent, this ticket no longer works; \
-                     ask for the new one)"
-                );
+                bail!("download failed: {e}");
             }
             None => {
                 if let Some(bar) = &bar {
@@ -170,9 +251,6 @@ async fn download(endpoint: &Endpoint, store: &FsStore, ticket: &BlobTicket) -> 
         Some(bar) => ui::finish_bar(bar, summary),
         None => say!("{summary}"),
     }
-
-    // We have everything; close the connection so a single-use server can shut down.
-    conn.close(0u32.into(), b"done");
     Ok(())
 }
 
