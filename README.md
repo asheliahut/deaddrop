@@ -189,6 +189,21 @@ a hard disconnect (the client crashed or lost its network), the server can
 take up to about 30 s to notice and free its slot; until then reconnects are
 refused and `fetch` just keeps retrying.
 
+To see what's in a drop before downloading it, use `fetch --list` (`-l`):
+
+```sh
+$ deaddrop fetch --list <ticket>
+    6.00 B  data/sub/b.txt
+292.97 KiB  data/a.bin
+2 files, 292.97 KiB
+```
+
+It fetches only the file names and sizes and prints one file per line on
+stdout, so it doesn't use up a single-use server's download. That needs a
+2.1 or newer server: an older one counts a listing as the download. With
+`--encrypt` data the names are encrypted too, so pass the key to see them;
+without it you get just the count and sizes.
+
 ### Resetting a server
 
 A server started with a reset token can be told to serve a different

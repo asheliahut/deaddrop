@@ -14,14 +14,14 @@
 //!   finished and rejects every later connection until a new root is set.
 //! - If the client goes away before finishing, the slot opens up again.
 //!
-//! Size probes (see [`size_probe`]) are answered but never count as a
-//! finished download, so a client can learn the total size first.
+//! Peeks (see [`is_peek`]) are answered but never count as a finished
+//! download, so a client can learn the total size and list the files first.
 //!
 //! Each download gets a progress bar (or plain lines when stderr isn't a
 //! terminal).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
@@ -43,6 +43,32 @@ pub fn size_probe() -> ChunkRangesSeq {
     ChunkRangesSeq::from_ranges_infinite([ChunkRanges::all(), ChunkRanges::last_chunk()])
 }
 
+/// The ranges `deaddrop fetch --list` asks for to read the file names: the
+/// hash seq and the collection's metadata blob (its names).
+pub fn names_probe() -> ChunkRangesSeq {
+    ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::all()])
+}
+
+/// The ranges `deaddrop fetch --list` asks for to read an encrypted
+/// collection's real names: the hash seq and the manifest (its first file).
+pub fn manifest_probe() -> ChunkRangesSeq {
+    ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::empty(), ChunkRanges::all()])
+}
+
+/// Whether a request only reads a collection's metadata, so it must not
+/// count as the single-use download: a [`size_probe`], or a finite request
+/// for nothing but the hash seq, the metadata blob and, if `encrypted`, the
+/// manifest. Never any file data (the manifest only holds encrypted names).
+fn is_peek(ranges: &ChunkRangesSeq, encrypted: bool) -> bool {
+    if *ranges == size_probe() {
+        return true;
+    }
+    // In the request, 0 is the hash seq, 1 the metadata blob and 2 the
+    // first file (the manifest of an encrypted collection).
+    let last = if encrypted { 2 } else { 1 };
+    !ranges.is_infinite() && ranges.iter_non_empty_infinite().all(|(i, _)| i <= last)
+}
+
 /// How long to wait for a single-use client to close the connection after
 /// the server has sent everything.
 const CLOSE_GRACE: Duration = Duration::from_secs(30);
@@ -50,6 +76,8 @@ const CLOSE_GRACE: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 struct State {
     single_use: bool,
+    /// Whether collections are encrypted (their first file is the manifest).
+    encrypted: bool,
     /// The collection being served, if any.
     root: Option<Hash>,
     /// Its size in bytes, for progress bars.
@@ -87,11 +115,13 @@ impl Gate {
 }
 
 /// Start the gate. In single-use mode, the receiver gets each root whose one
-/// download has finished.
+/// download has finished. `encrypted`: the collections have a manifest that
+/// clients may peek at.
 pub fn watcher(
     root: Hash,
     total: u64,
     single_use: bool,
+    encrypted: bool,
 ) -> (EventSender, Gate, mpsc::Receiver<Hash>) {
     let mask = EventMask {
         connected: if single_use {
@@ -109,6 +139,7 @@ pub fn watcher(
     let (events, rx) = EventSender::channel(32, mask);
     let gate = Gate(watch::Sender::new(State {
         single_use,
+        encrypted,
         root: Some(root),
         total,
         active: HashMap::new(),
@@ -131,6 +162,8 @@ async fn run(
     let mut grace_root: Option<Hash> = None;
     // Short endpoint ids of connected clients, for progress bars.
     let mut clients: HashMap<u64, String> = HashMap::new();
+    // Connections that asked for file data, not just peeks.
+    let mut downloaders: HashSet<u64> = HashSet::new();
 
     loop {
         tokio::select! {
@@ -166,6 +199,7 @@ async fn run(
                     }
                     ProviderMessage::ConnectionClosed(msg) => {
                         clients.remove(&msg.connection_id);
+                        let downloaded = downloaders.remove(&msg.connection_id);
                         let mut finished = None;
                         state.send_if_modified(|s| {
                             if s.conn != Some(msg.connection_id) {
@@ -174,6 +208,10 @@ async fn run(
                             match s.completed {
                                 // Keep the slot taken: no more downloads of this root.
                                 Some(root) => finished = Some(root),
+                                None if !downloaded => {
+                                    say!("client disconnected after only looking at the file list");
+                                    s.conn = None;
+                                }
                                 None => {
                                     say!("client disconnected before finishing; waiting for another client");
                                     s.conn = None;
@@ -191,13 +229,14 @@ async fn run(
                     ProviderMessage::GetRequestReceived(msg) => {
                         let conn = msg.connection_id;
                         let hash = msg.request.hash;
-                        let probe = msg.request.ranges == size_probe();
+                        let mut probe = false;
                         let mut total = 0;
                         // Check and count in one step, so a reset can't slip in between.
                         let mut ok = false;
                         let mut single_use = false;
                         state.send_if_modified(|s| {
                             single_use = s.single_use;
+                            probe = is_peek(&msg.request.ranges, s.encrypted);
                             total = s.total;
                             ok = s.root == Some(hash)
                                 && (!s.single_use || (s.conn == Some(conn) && s.completed.is_none()));
@@ -216,6 +255,9 @@ async fn run(
                         });
                         let res = if ok { Ok(()) } else { Err(AbortReason::Permission) };
                         msg.tx.send(res).await.ok();
+                        if ok && !probe {
+                            downloaders.insert(conn);
+                        }
                         if ok {
                             let mut updates = msg.rx;
                             let state = state.clone();
@@ -232,7 +274,7 @@ async fn run(
                                     }
                                     match update {
                                         RequestUpdate::Completed(_) => {
-                                            // A size probe is not the download.
+                                            // A peek is not the download.
                                             if single_use && !probe {
                                                 completed_tx.send((conn, hash)).await.ok();
                                             }
@@ -365,5 +407,43 @@ impl Drop for SendProgress {
         {
             ui::fail_bar(bar, format!("transfer to {} ended", self.client));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peeks() {
+        assert!(is_peek(&size_probe(), false));
+        assert!(is_peek(&size_probe(), true));
+        assert!(is_peek(&names_probe(), false));
+        assert!(is_peek(&names_probe(), true));
+        assert!(is_peek(&ChunkRangesSeq::root(), false));
+        // The manifest only counts as metadata when the data is encrypted.
+        assert!(is_peek(&manifest_probe(), true));
+        assert!(!is_peek(&manifest_probe(), false));
+    }
+
+    #[test]
+    fn downloads_are_not_peeks() {
+        assert!(!is_peek(&ChunkRangesSeq::all(), false));
+        assert!(!is_peek(&ChunkRangesSeq::all(), true));
+        // Any file data, even part of one.
+        let second_file = ChunkRangesSeq::from_ranges([
+            ChunkRanges::all(),
+            ChunkRanges::empty(),
+            ChunkRanges::empty(),
+            ChunkRanges::all(),
+        ]);
+        assert!(!is_peek(&second_file, true));
+        let tail = ChunkRangesSeq::from_ranges_infinite([
+            ChunkRanges::empty(),
+            ChunkRanges::empty(),
+            ChunkRanges::all(),
+        ]);
+        assert!(!is_peek(&tail, false));
+        assert!(!is_peek(&tail, true));
     }
 }

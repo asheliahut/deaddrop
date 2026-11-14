@@ -6,14 +6,20 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use iroh::{Endpoint, RelayMode, endpoint::Connection};
 use iroh_blobs::{
-    BlobFormat, Hash, api::remote::GetProgressItem, format::collection::Collection,
-    get::request::get_hash_seq_and_sizes, store::fs::FsStore, ticket::BlobTicket,
+    BlobFormat, Hash,
+    api::remote::GetProgressItem,
+    format::collection::Collection,
+    get::request::get_hash_seq_and_sizes,
+    protocol::GetRequest,
+    store::{fs::FsStore, mem::MemStore},
+    ticket::BlobTicket,
 };
 use n0_future::StreamExt;
 use tokio_util::io::SyncIoBridge;
 
 use crate::{
     crypt::{self, Key, Manifest},
+    gate,
     torrent::human,
     ui,
 };
@@ -63,6 +69,151 @@ pub async fn run(
         Err(_) => {}
     }
     res
+}
+
+/// Print the files the server offers, with their sizes, without
+/// downloading them. Only metadata is fetched, so this doesn't use up a
+/// single-use server's download (from deaddrop 2.1 on: an older server
+/// counts it as the download).
+pub async fn list(ticket: BlobTicket, key: Option<Key>, relay: &RelayMode) -> Result<()> {
+    ensure!(
+        ticket.format() == BlobFormat::HashSeq,
+        "this ticket is for a single blob, not a deaddrop collection"
+    );
+    let endpoint = crate::net::bind(relay).await?;
+    let res = async {
+        say!("connecting to {}", ticket.addr().id);
+        let conn = endpoint
+            .connect(ticket.addr().clone(), iroh_blobs::ALPN)
+            .await
+            .context("failed to connect to the server")?;
+        let res = peek(&conn, &ticket, key.as_ref()).await;
+        // Close right away, so a single-use server frees its slot.
+        conn.close(0u32.into(), b"done");
+        res
+    }
+    .await;
+    endpoint.close().await;
+    let listing = res.context(
+        "could not list the files. If the server refused (\"permission\"): another \
+         client may be downloading from this single-use server, its one download may be \
+         done already, or the ticket no longer works after a reset",
+    )?;
+
+    let total: u64 = listing.files.iter().map(|(_, size)| size).sum();
+    if let Some(name) = &listing.name {
+        say!("{name}");
+    }
+    for (name, size) in &listing.files {
+        println!("{:>10}  {name}", human(*size));
+    }
+    let count = listing.files.len();
+    let plural = if count == 1 { "" } else { "s" };
+    match (listing.encrypted, listing.name.is_some()) {
+        (false, _) => say!("{count} file{plural}, {}", human(total)),
+        (true, true) => say!(
+            "{count} file{plural}, {} encrypted (the files are a little smaller decrypted)",
+            human(total)
+        ),
+        (true, false) => say!(
+            "{count} encrypted file{plural}, {}. The names are encrypted too: pass the \
+             decryption key in DEADDROP_KEY or with --key to see them",
+            human(total)
+        ),
+    }
+    Ok(())
+}
+
+/// What `fetch --list` found.
+struct Listing {
+    /// The torrent's name, from an encrypted collection's manifest.
+    name: Option<String>,
+    encrypted: bool,
+    /// Name (or, encrypted without a key, index) and size of each file.
+    files: Vec<(String, u64)>,
+}
+
+/// Read the file names and sizes over `conn`. Uses only requests the server
+/// gate counts as peeks: the size probe, the collection's names, and (with
+/// a key) the encrypted manifest.
+async fn peek(conn: &Connection, ticket: &BlobTicket, key: Option<&Key>) -> Result<Listing> {
+    let root = ticket.hash();
+    let (_, sizes) = get_hash_seq_and_sizes(conn, &root, MAX_HASH_SEQ_BYTES, None)
+        .await
+        .context("failed to get the file sizes")?;
+
+    let store = MemStore::new();
+    store
+        .remote()
+        .execute_get(conn.clone(), GetRequest::new(root, gate::names_probe()))
+        .await
+        .context("failed to get the file names")?;
+    let collection = Collection::load(root, &*store).await?;
+    // The hash seq's first child is the names blob, then one per file.
+    let file_sizes = sizes.get(1..).unwrap_or_default();
+    ensure!(
+        file_sizes.len() == collection.len(),
+        "the server sent {} size(s) for {} file(s)",
+        file_sizes.len(),
+        collection.len()
+    );
+
+    let encrypted =
+        matches!(collection.iter().next(), Some((name, _)) if name == crypt::MANIFEST_NAME);
+    if !encrypted {
+        if key.is_some() {
+            say!("note: the data is not encrypted; ignoring the decryption key");
+        }
+        let files = collection
+            .iter()
+            .zip(file_sizes)
+            .map(|((name, _), size)| (name.clone(), *size))
+            .collect();
+        return Ok(Listing {
+            name: None,
+            encrypted,
+            files,
+        });
+    }
+
+    // Encrypted: the entries after the manifest are named by index.
+    let file_sizes = &file_sizes[1..];
+    let Some(key) = key else {
+        let files = (1..)
+            .zip(file_sizes)
+            .map(|(i, size)| (format!("(encrypted file {i})"), *size))
+            .collect();
+        return Ok(Listing {
+            name: None,
+            encrypted,
+            files,
+        });
+    };
+    let (_, manifest_hash) = collection.iter().next().context("empty collection")?;
+    store
+        .remote()
+        .execute_get(conn.clone(), GetRequest::new(root, gate::manifest_probe()))
+        .await
+        .context("failed to get the encrypted file names")?;
+    let manifest = store.blobs().get_bytes(*manifest_hash).await?;
+    let manifest = Manifest::decrypt(key, &manifest)?;
+    ensure!(
+        manifest.files.len() == file_sizes.len(),
+        "the manifest lists {} file(s) but the collection has {}",
+        manifest.files.len(),
+        file_sizes.len()
+    );
+    let files = manifest
+        .files
+        .into_iter()
+        .zip(file_sizes)
+        .map(|(name, size)| (name, *size))
+        .collect();
+    Ok(Listing {
+        name: Some(manifest.name),
+        encrypted,
+        files,
+    })
 }
 
 /// The data is encrypted but no key was given.

@@ -146,7 +146,8 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
 
     // 3. Serve the collection over iroh.
     let endpoint = crate::net::bind(&opts.relay).await?;
-    let (events, gate, mut done) = gate::watcher(first.root.hash(), first.total, single_use);
+    let (events, gate, mut done) =
+        gate::watcher(first.root.hash(), first.total, single_use, encrypt);
     let blobs = BlobsProtocol::new(&store, Some(events));
     let mut router = Router::builder(endpoint).accept(iroh_blobs::ALPN, blobs);
     let mut jobs = None;

@@ -140,12 +140,16 @@ async fn main() -> Result<()> {
             ticket,
             out,
             key,
+            list,
             retry_for,
         } => {
             let key = key
                 .filter(|k| !k.is_empty())
                 .map(|k| crypt::Key::parse(&k))
                 .transpose()?;
+            if list {
+                return client::list(ticket, key, &relay).await;
+            }
             let out = out.or(config.fetch.out).unwrap_or_else(|| ".".into());
             let retry_for = retry_for
                 .or(config.fetch.retry_for)

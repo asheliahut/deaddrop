@@ -105,6 +105,10 @@ deaddrop fetch "$TICKET" -o ./downloads
 DEADDROP_KEY="$KEY" deaddrop fetch "$TICKET" -o ./downloads   # data served with --encrypt
 ```
 
+- `deaddrop fetch --list "$TICKET"` prints the files and sizes (stdout, one
+  per line) without downloading. It doesn't use up a single-use download on a
+  2.1+ server, but an older server counts it as the download, so don't list
+  first against a server of unknown version. Encrypted names need the key.
 - `fetch` checks the size first, then downloads into
   `.deaddrop-<hash>/` inside the output dir, writes the files, and deletes the
   temp folder.

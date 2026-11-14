@@ -180,12 +180,18 @@ download is kept in the temporary folder, so running the same command again
 with the key finishes without contacting the server.
 
 When the download finishes the client disconnects, which lets a single-use
-server shut down.";
+server shut down.
+
+With --list, the client only prints the files and their sizes (on stdout)
+and downloads nothing. This doesn't use up a single-use server's download,
+as long as the server runs deaddrop 2.1 or later; an older one counts it as
+the download. Encrypted file names are only shown with the key.";
 
 const FETCH_AFTER_HELP: &str = "\
 Examples:
   deaddrop fetch blobaa...            Write files into the current directory
   deaddrop fetch blobaa... -o ~/dl    Write files into ~/dl
+  deaddrop fetch --list blobaa...     See what's in it first
   export DEADDROP_KEY=AGE-SECRET-KEY-1...   For data served with --encrypt
   deaddrop fetch blobaa...";
 
@@ -458,6 +464,12 @@ pub enum Command {
             hide_env_values = true
         )]
         key: Option<String>,
+
+        /// List the files and their sizes, without downloading them
+        ///
+        /// Only the file names and sizes are fetched, so this doesn't use up a single-use server's download (servers older than 2.1 do count it as the download). With --encrypt data, the names are only shown with the key.
+        #[arg(short, long)]
+        list: bool,
 
         /// Keep reconnecting for this many seconds without progress after the connection drops [default: 120] [config: fetch.retry_for]
         ///

@@ -19,6 +19,12 @@ All notable changes to deaddrop. The format follows
 
 ### Added
 
+- **`fetch --list` shows what's in a drop without downloading it**: each
+  file's path and size on stdout, and a total. Only the names and sizes are
+  fetched, and the server doesn't count that as the single-use download, so
+  the real `fetch` still works afterwards. With `--encrypt` data the names
+  are shown only with the key. A server older than 2.1 does count a listing
+  as its one download.
 - **`fetch` resumes interrupted downloads.** If the connection drops, it
   reconnects and downloads only what is missing, for up to `--retry-for`
   seconds (`fetch.retry_for`, default 120) without progress. If it gives up
