@@ -8,6 +8,7 @@ mod client;
 mod config;
 mod crypt;
 mod gate;
+mod identity;
 mod net;
 mod notify;
 mod reset;
@@ -95,8 +96,23 @@ async fn main() -> Result<()> {
             wait_for_reset,
             encrypt,
             hide_key,
+            allow,
+            expire_after,
         } => {
             let file = config.serve;
+            // Flags and DEADDROP_ALLOW, else the config file.
+            let allow = parse_allow(if allow.is_empty() {
+                &file.allow
+            } else {
+                &allow
+            })
+            .context("bad --allow / serve.allow")?;
+            let expire_after = match expire_after.filter(|e| !e.is_empty()).or(file.expire_after) {
+                Some(e) => {
+                    server::parse_duration(&e).context("bad --expire-after / serve.expire_after")?
+                }
+                None => None,
+            };
             // Flags and DEADDROP_NOTIFY arrive here together (clap handles
             // flag-over-env); fall back to the config file if both are empty.
             let notify = if notify.is_empty() {
@@ -115,6 +131,8 @@ async fn main() -> Result<()> {
                 encrypt: encrypt.or(file.encrypt).unwrap_or(false),
                 hide_key: hide_key.or(file.hide_key).unwrap_or(false),
                 relay,
+                allow,
+                expire_after,
             })
             .await
         }
@@ -142,24 +160,61 @@ async fn main() -> Result<()> {
             key,
             list,
             retry_for,
+            identity,
         } => {
             let key = key
                 .filter(|k| !k.is_empty())
                 .map(|k| crypt::Key::parse(&k))
                 .transpose()?;
+            let identity = identity::for_fetch(
+                identity
+                    .filter(|i| !i.as_os_str().is_empty())
+                    .or(config.fetch.identity)
+                    .as_deref(),
+            )?;
             if list {
-                return client::list(ticket, key, &relay).await;
+                return client::list(ticket, key, &relay, identity).await;
             }
             let out = out.or(config.fetch.out).unwrap_or_else(|| ".".into());
             let retry_for = retry_for
                 .or(config.fetch.retry_for)
                 .unwrap_or(DEFAULT_RETRY_FOR);
-            client::run(ticket, out, key, &relay, Duration::from_secs(retry_for)).await
+            client::run(
+                ticket,
+                out,
+                key,
+                &relay,
+                identity,
+                Duration::from_secs(retry_for),
+            )
+            .await
+        }
+        Command::Id { identity, new } => {
+            let path = identity
+                .filter(|i| !i.as_os_str().is_empty())
+                .or(config.fetch.identity)
+                .or_else(identity::default_path)
+                .context("no data directory found on this platform; pass --identity <FILE>")?;
+            let (key, created) = identity::load_or_create(&path, new)?;
+            match (created, new) {
+                (true, true) => say!("created a new identity in {}", path.display()),
+                (true, false) => say!("created an identity in {}", path.display()),
+                (false, _) => say!("identity file: {}", path.display()),
+            }
+            say!("give this id to a server's operator for `deaddrop serve --allow <ID>`:");
+            write_stdout(&format!("{}\n", key.public()))
         }
         Command::Config { .. } | Command::Completions { .. } | Command::Skill { .. } => {
             unreachable!("handled above")
         }
     }
+}
+
+fn parse_allow(ids: &[String]) -> Result<Vec<iroh::EndpointId>> {
+    ids.iter()
+        .filter(|a| !a.trim().is_empty())
+        .map(|a| identity::parse_id(a))
+        .collect()
 }
 
 fn parse_notify_flags(specs: &[String]) -> Result<Vec<NotifierConfig>> {
@@ -284,6 +339,25 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
                 "serve.hide_key       {}",
                 or_default(c.serve.hide_key.map(|b| b.to_string()), "false")
             )?;
+            let allow = parse_allow(&c.serve.allow).context("invalid serve.allow")?;
+            writeln!(
+                o,
+                "serve.allow          {}",
+                if allow.is_empty() {
+                    "anyone with the ticket (default)".into()
+                } else {
+                    let ids: Vec<String> =
+                        allow.iter().map(|id| id.fmt_short().to_string()).collect();
+                    format!("{} client(s): {}", ids.len(), ids.join(", "))
+                }
+            )?;
+            let expire = match &c.serve.expire_after {
+                Some(e) => server::parse_duration(e)
+                    .context("invalid serve.expire_after")?
+                    .map_or_else(|| "never".into(), server::fmt_duration),
+                None => "never (default)".into(),
+            };
+            writeln!(o, "serve.expire_after   {expire}")?;
             writeln!(
                 o,
                 "fetch.out            {}",
@@ -295,6 +369,15 @@ fn config_command(action: &ConfigAction, explicit: Option<&std::path::Path>) -> 
                 or_default(
                     c.fetch.retry_for.map(|s| s.to_string()),
                     &DEFAULT_RETRY_FOR.to_string()
+                )
+            )?;
+            writeln!(
+                o,
+                "fetch.identity       {}",
+                or_default(
+                    c.fetch.identity.map(|d| d.display().to_string()),
+                    &identity::default_path()
+                        .map_or_else(|| "none".into(), |p| p.display().to_string())
                 )
             )?;
             let relay = match relay {

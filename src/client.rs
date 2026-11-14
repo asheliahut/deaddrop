@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use iroh::{Endpoint, RelayMode, endpoint::Connection};
+use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::Connection};
 use iroh_blobs::{
     BlobFormat, Hash,
     api::remote::GetProgressItem,
@@ -20,6 +20,7 @@ use tokio_util::io::SyncIoBridge;
 use crate::{
     crypt::{self, Key, Manifest},
     gate,
+    net::Refusal,
     torrent::human,
     ui,
 };
@@ -28,11 +29,117 @@ use crate::{
 /// allows about a million files.
 const MAX_HASH_SEQ_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Why a download can keep failing, shown when the client gives up.
+/// Why a download can keep failing, shown when the client gives up. A 2.1+
+/// server says why it turns a client away (see [`Refused`]); an older one
+/// only says "permission".
 const GAVE_UP: &str = "the download did not finish. If the server refused it \
     (\"permission\"): another client may be downloading from this single-use server, \
     its one download may be done already, or it was reset to a different torrent and \
     this ticket no longer works";
+
+/// The server turned this client away, and said why.
+#[derive(Debug)]
+struct Refused {
+    why: Refusal,
+    /// This client's persistent identity (from `deaddrop id`), if it used one.
+    me: Option<EndpointId>,
+    /// How long the client waited for a busy slot before giving up.
+    waited: Option<Duration>,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.why, &self.me) {
+            (Refusal::NotAllowed, Some(id)) => write!(
+                f,
+                "the server only accepts specific clients, and this one ({id}) isn't on its \
+                 allow list. Ask the server's operator to add it with `--allow {id}`."
+            ),
+            (Refusal::NotAllowed, None) => f.write_str(
+                "the server only accepts specific clients, and this fetch had no identity \
+                 (it used a new random id). Run `deaddrop id` to create one, give the id it \
+                 prints to the server's operator, and fetch again once they have added it.",
+            ),
+            (Refusal::Busy, _) => {
+                f.write_str(
+                    "another client is downloading from this single-use server, so it turned \
+                     this one away",
+                )?;
+                if let Some(w) = self.waited {
+                    write!(f, " (waited {}s for the slot to free up)", w.as_secs())?;
+                }
+                f.write_str(
+                    ". If that download fails partway, the server lets the next client in: \
+                     run the same command again later.",
+                )
+            }
+            (Refusal::Downloaded, _) => f.write_str(
+                "this single-use drop has already been downloaded (by another client, or an \
+                 earlier run), and the server deletes the data afterwards. Ask the sender \
+                 for a new ticket.",
+            ),
+            (Refusal::Expired, _) => f.write_str(
+                "this ticket expired before it was downloaded, and the server deleted the \
+                 data. Ask the sender for a new ticket.",
+            ),
+            (Refusal::Replaced, _) => f.write_str(
+                "this ticket no longer works: the server was reset to serve something else. \
+                 Ask the sender for the new ticket.",
+            ),
+            (Refusal::Unknown, _) => f.write_str(
+                "the server isn't serving this ticket. Check that it was copied completely \
+                 and is the latest one.",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// The server's reason for turning this client away, if it gave one.
+fn refusal(err: &anyhow::Error) -> Option<Refusal> {
+    err.downcast_ref::<Refused>().map(|r| r.why)
+}
+
+/// Bind the client's endpoint, with its persistent identity if it has one
+/// (returned too, for error messages).
+async fn bind(
+    relay: &RelayMode,
+    identity: Option<SecretKey>,
+) -> Result<(Endpoint, Option<EndpointId>)> {
+    let persistent = identity.is_some();
+    let endpoint = crate::net::bind_with(relay, identity, &[]).await?;
+    let id = persistent.then(|| endpoint.id());
+    if let Some(id) = id {
+        say!("using identity {}", id.fmt_short());
+    }
+    Ok((endpoint, id))
+}
+
+/// Turn a failure on `conn` into [`Refused`] if the server closed the
+/// connection to turn this client away.
+async fn check_refused(
+    err: anyhow::Error,
+    conn: &Connection,
+    me: Option<EndpointId>,
+) -> anyhow::Error {
+    // The request can fail a moment before the close frame (and its
+    // reason) is processed; give it a little time.
+    if conn.close_reason().is_none() {
+        tokio::time::timeout(Duration::from_millis(500), conn.closed())
+            .await
+            .ok();
+    }
+    match Refusal::of(conn) {
+        Some(why) => Refused {
+            why,
+            me,
+            waited: None,
+        }
+        .into(),
+        None => err,
+    }
+}
 
 /// Longest wait between two reconnect attempts.
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(10);
@@ -42,6 +149,7 @@ pub async fn run(
     out: PathBuf,
     key: Option<Key>,
     relay: &RelayMode,
+    identity: Option<SecretKey>,
     retry_for: Duration,
 ) -> Result<()> {
     ensure!(
@@ -53,9 +161,28 @@ pub async fn run(
     // Download into a temporary store inside the output directory, write
     // (and if needed decrypt) the files out of it, then delete it.
     let store_dir = out.join(format!(".deaddrop-{}", ticket.hash().fmt_short()));
-    let res = fetch(&ticket, &out, &store_dir, key.as_ref(), relay, retry_for).await;
+    let (res, have) = fetch(
+        &ticket,
+        &out,
+        &store_dir,
+        key.as_ref(),
+        relay,
+        identity,
+        retry_for,
+    )
+    .await;
     match &res {
         Ok(()) => {
+            tokio::fs::remove_dir_all(&store_dir).await.ok();
+        }
+        // Turned away for good: what was downloaded can never be finished.
+        Err(e) if refusal(e).is_some_and(|r| r != Refusal::NotAllowed && !r.is_temporary()) => {
+            if tokio::fs::remove_dir_all(&store_dir).await.is_ok() && have > 0 {
+                say!("deleted the partial download; it can't be finished");
+            }
+        }
+        // Nothing was downloaded: nothing to keep.
+        Err(_) if have == 0 => {
             tokio::fs::remove_dir_all(&store_dir).await.ok();
         }
         // Keep whatever was downloaded: the server may be single use, and a
@@ -75,25 +202,38 @@ pub async fn run(
 /// downloading them. Only metadata is fetched, so this doesn't use up a
 /// single-use server's download (from deaddrop 2.1 on: an older server
 /// counts it as the download).
-pub async fn list(ticket: BlobTicket, key: Option<Key>, relay: &RelayMode) -> Result<()> {
+pub async fn list(
+    ticket: BlobTicket,
+    key: Option<Key>,
+    relay: &RelayMode,
+    identity: Option<SecretKey>,
+) -> Result<()> {
     ensure!(
         ticket.format() == BlobFormat::HashSeq,
         "this ticket is for a single blob, not a deaddrop collection"
     );
-    let endpoint = crate::net::bind(relay).await?;
+    let (endpoint, me) = bind(relay, identity).await?;
     let res = async {
         say!("connecting to {}", ticket.addr().id);
         let conn = endpoint
             .connect(ticket.addr().clone(), iroh_blobs::ALPN)
             .await
             .context("failed to connect to the server")?;
-        let res = peek(&conn, &ticket, key.as_ref()).await;
+        let res = match peek(&conn, &ticket, key.as_ref()).await {
+            Ok(l) => Ok(l),
+            Err(e) => Err(check_refused(e, &conn, me).await),
+        };
         // Close right away, so a single-use server frees its slot.
         conn.close(0u32.into(), b"done");
         res
     }
     .await;
     endpoint.close().await;
+    if let Err(e) = &res
+        && refusal(e).is_some()
+    {
+        return res.map(|_| ());
+    }
     let listing = res.context(
         "could not list the files. If the server refused (\"permission\"): another \
          client may be downloading from this single-use server, its one download may be \
@@ -238,25 +378,31 @@ async fn fetch(
     store_dir: &Path,
     key: Option<&Key>,
     relay: &RelayMode,
+    identity: Option<SecretKey>,
     retry_for: Duration,
-) -> Result<()> {
-    let store = FsStore::load(store_dir).await?;
+) -> (Result<()>, u64) {
+    let store = match FsStore::load(store_dir).await {
+        Ok(s) => s,
+        Err(e) => return (Err(e.into()), 0),
+    };
     let res = async {
         // Left over from an earlier run that had no key.
         let local = store.remote().local(ticket.hash_and_format()).await?;
         if local.is_complete() {
             say!("already downloaded; not contacting the server");
         } else {
-            let endpoint = crate::net::bind(relay).await?;
-            let res = download_with_retries(&endpoint, &store, ticket, retry_for).await;
+            let (endpoint, me) = bind(relay, identity).await?;
+            let res = download_with_retries(&endpoint, me, &store, ticket, retry_for).await;
             endpoint.close().await;
             res?;
         }
         write_files(&store, ticket, out, key).await
     }
     .await;
+    // How much of the download there is, to decide whether to keep it.
+    let have = local_bytes(&store, ticket).await;
     store.shutdown().await.ok();
-    res
+    (res, have)
 }
 
 /// Bytes of the collection already in the local store.
@@ -276,6 +422,7 @@ async fn local_bytes(store: &FsStore, ticket: &BlobTicket) -> u64 {
 /// progress.
 async fn download_with_retries(
     endpoint: &Endpoint,
+    me: Option<EndpointId>,
     store: &FsStore,
     ticket: &BlobTicket,
     retry_for: Duration,
@@ -286,8 +433,12 @@ async fn download_with_retries(
     }
     let mut last_progress = Instant::now();
     let mut delay = Duration::from_secs(1);
+    // When the client started waiting for a busy single-use slot.
+    let mut busy_since: Option<Instant> = None;
+    // Whether the server ever said another client was downloading.
+    let mut saw_busy = false;
     loop {
-        let err = match download(endpoint, store, ticket).await {
+        let mut err = match download(endpoint, me, store, ticket).await {
             Ok(()) => return Ok(()),
             Err(e) => e,
         };
@@ -297,7 +448,52 @@ async fn download_with_retries(
             last_progress = Instant::now();
             delay = Duration::from_secs(1);
         }
+        let why = refusal(&err);
+        if let Some(r) = err.downcast_mut::<Refused>()
+            && why == Some(Refusal::Busy)
+        {
+            r.waited = busy_since.map(|t| t.elapsed());
+        }
+        match why {
+            // Retrying won't change the server's mind.
+            Some(r) if !r.is_temporary() => return Err(err),
+            Some(_) => {
+                saw_busy = true;
+                if last_progress.elapsed() + delay > retry_for {
+                    return Err(err);
+                }
+                // Say it once, not on every attempt.
+                if busy_since.is_none() {
+                    busy_since = Some(Instant::now());
+                    if have > 0 {
+                        say!(
+                            "the server's download slot is still taken, probably by this \
+                             client's dropped connection (it can take the server about 30 s \
+                             to notice); waiting"
+                        );
+                    } else {
+                        say!(
+                            "another client is downloading from this single-use server; \
+                             waiting up to {}s in case it drops out",
+                            retry_for.as_secs()
+                        );
+                    }
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(MAX_RETRY_DELAY);
+                continue;
+            }
+            None => {}
+        }
+        busy_since = None;
         if last_progress.elapsed() + delay > retry_for {
+            if saw_busy {
+                return Err(err.context(
+                    "the server was busy with another client's download and then stopped \
+                     answering: most likely that download finished and the single-use server \
+                     deleted the data and shut down. Ask the sender for a new ticket.",
+                ));
+            }
             return Err(err.context(GAVE_UP));
         }
         say!("{err:#}");
@@ -311,13 +507,21 @@ async fn download_with_retries(
     }
 }
 
-async fn download(endpoint: &Endpoint, store: &FsStore, ticket: &BlobTicket) -> Result<()> {
+async fn download(
+    endpoint: &Endpoint,
+    me: Option<EndpointId>,
+    store: &FsStore,
+    ticket: &BlobTicket,
+) -> Result<()> {
     say!("connecting to {}", ticket.addr().id);
     let conn = endpoint
         .connect(ticket.addr().clone(), iroh_blobs::ALPN)
         .await
         .context("failed to connect to the server")?;
-    let res = transfer(&conn, store, ticket).await;
+    let res = match transfer(&conn, store, ticket).await {
+        Ok(()) => Ok(()),
+        Err(e) => Err(check_refused(e, &conn, me).await),
+    };
     // Close right away, on errors too, so a single-use server frees its slot
     // (for our next attempt) instead of waiting for the connection to time out.
     match &res {

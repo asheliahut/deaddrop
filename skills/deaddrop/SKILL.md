@@ -59,6 +59,18 @@ deaddrop serve 'magnet:?xt=urn:btih:...' > ticket.txt
 - `--peer <IP:PORT>` (repeatable) adds BitTorrent peers when DHT and trackers
   can't find any.
 
+### Limiting who and how long
+
+- `--allow <ID>` (repeatable, `DEADDROP_ALLOW` comma-separated,
+  `serve.allow`) only lets those clients download or list. The client runs
+  `deaddrop id` and gives the printed id (64 hex characters, not secret) to
+  the server's operator. Anyone else is turned away, so a leaked ticket is
+  useless to them.
+- `--expire-after <DURATION>` (`30m`, `24h`, `7d`, `1h30m`; `serve.expire_after`)
+  makes each ticket stop working that long after it is printed, if not used
+  up first. Then the data is deleted and the server exits (or, with
+  `--wait-for-reset`, waits; each reset's ticket gets the full time again).
+
 ### Encryption
 
 iroh always encrypts the connection. `--encrypt` adds age encryption at
@@ -115,14 +127,22 @@ DEADDROP_KEY="$KEY" deaddrop fetch "$TICKET" -o ./downloads   # data served with
 - If the connection drops, `fetch` reconnects and resumes on its own for up to
   `--retry-for` seconds (default 120) without progress. If it still fails,
   the partial download is kept; **rerun the same command to resume**. Don't
-  delete `.deaddrop-<hash>/` unless the user wants to give up. A refusal
-  ("permission") can mean the single-use server's one download already
-  finished, another client holds the slot, or the server was reset (the
-  ticket is stale).
+  delete `.deaddrop-<hash>/` unless the user wants to give up.
+- A 2.1+ server says why it turns a client away, and `fetch` prints it:
+  another client is downloading (it waits, then gives up after
+  `--retry-for`; rerun later), already downloaded, expired, replaced by a
+  reset, or not on the allow list. Only "another client is downloading" is
+  worth retrying; for the rest, the user needs a new ticket (or to be
+  allowed). A bare "permission" comes from a server older than 2.1.
 - If the data is encrypted and no key was given, it stops with an error but
   **keeps the download**. Rerunning with the key finishes without the server,
   even after a single-use server has exited.
 - A key passed for data that isn't encrypted is ignored, with a note.
+- "the server only accepts specific clients": the server uses `--allow`
+  and this client isn't on it. `fetch` stops at once (no retries). Run
+  `deaddrop id` (creates the identity on first use; `fetch` uses it from then
+  on) and have the server's operator add the printed id. Never copy another
+  machine's identity file to get around it.
 
 ## Output and exit codes
 

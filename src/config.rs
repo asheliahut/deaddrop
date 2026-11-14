@@ -51,6 +51,10 @@ pub struct ServeConfig {
     /// With encrypt: never print the key, only send it to notifiers with
     /// include_key. Defaults to false.
     pub hide_key: Option<bool>,
+    /// Only these client endpoint ids may download (`deaddrop id`).
+    pub allow: Vec<String>,
+    /// How long each ticket lasts, e.g. "24h". Defaults to no limit.
+    pub expire_after: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -59,6 +63,8 @@ pub struct FetchConfig {
     pub out: Option<PathBuf>,
     /// Seconds to keep reconnecting without progress. Defaults to 120.
     pub retry_for: Option<u64>,
+    /// Identity file for `fetch` and `id`. Defaults to the platform data dir.
+    pub identity: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -171,6 +177,9 @@ pub fn load(explicit: Option<&Path>) -> Result<(Config, Option<PathBuf>)> {
     }
     if let Some(o) = &mut config.fetch.out {
         *o = base.join(&*o);
+    }
+    if let Some(i) = &mut config.fetch.identity {
+        *i = base.join(&*i);
     }
 
     warn_if_world_readable(&path, &config);

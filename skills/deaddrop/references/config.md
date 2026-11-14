@@ -61,6 +61,19 @@ multi_use = false
 # the key out of terminals and logs. No effect without encrypt.
 # hide_key = false
 
+# Only let these clients download (or list). Each client gets its id from
+# `deaddrop id`; everyone else is turned away, so a leaked ticket is useless
+# to them. Empty (the default): anyone with the ticket. --allow and
+# DEADDROP_ALLOW replace this list. Resets aren't affected.
+# allow = ["<id from `deaddrop id` on the client>"]
+
+# Stop serving each ticket this long after it's printed, if it hasn't been
+# used up: then the data is deleted and the server exits (or, with
+# wait_for_reset, waits for a reset, whose ticket gets the full time again).
+# A download already running may finish. Like "30m", "24h", "7d" or "1h30m";
+# a bare number is seconds. Unset or "never" (the default): no limit.
+# expire_after = "24h"
+
 # Notifiers, sent when the ticket is ready. Add as many as you like.
 # Any --notify flag or DEADDROP_NOTIFY replaces this whole list.
 # With encrypt = true, include_key = true also sends the decryption key
@@ -81,6 +94,12 @@ include_key = true
 # If the connection drops, keep reconnecting (and resuming) for this many
 # seconds without progress. 0 gives up on the first failure. Default: 120.
 # retry_for = 120
+
+# Identity file for `fetch` (and `deaddrop id`), so a server can --allow this
+# client. Default: ~/.local/share/deaddrop/identity.key on Linux, used only
+# once `deaddrop id` has created it; without one, each fetch uses a new
+# random id. DEADDROP_IDENTITY and --identity override it.
+# identity = "/home/me/.local/share/deaddrop/identity.key"
 
 [reset]
 # The server's reset token, used by `deaddrop reset`. --token and

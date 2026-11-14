@@ -22,7 +22,9 @@ A dead drop in two steps:
      BLAKE3 hash.
 
 By default the server is single use: it deletes the data and shuts down once
-one client has it.
+one client has it. `serve --expire-after 24h` also gives up after a set time,
+and `serve --allow <ID>` only lets the clients whose `deaddrop id` you were
+given download.
 
 With `serve --encrypt`, the files are also age-encrypted on the server (the
 plaintext is deleted) and a decryption key is printed, which the client
@@ -35,6 +37,8 @@ Examples:
   deaddrop fetch <ticket>                      Get the files
   deaddrop serve --encrypt ./file.torrent      Also age-encrypt; prints a key
   deaddrop reset <ticket> 'magnet:?xt=...'     Make a server serve another torrent
+  deaddrop serve x.torrent --expire-after 24h  Stop serving if unused after a day
+  deaddrop id                                  Show this client's id, for `serve --allow`
   deaddrop serve x.torrent --no-progress       Plain progress lines on a terminal
   deaddrop config example > ~/.config/deaddrop/config.toml
   deaddrop skill install                       Teach AI coding agents to use deaddrop
@@ -49,6 +53,8 @@ Examples:
   deaddrop fetch <ticket>                      Get the files
   deaddrop serve --encrypt ./file.torrent      Also age-encrypt; prints a key
   deaddrop reset <ticket> 'magnet:?xt=...'     Make a server serve another torrent
+  deaddrop serve x.torrent --expire-after 24h  Stop serving if unused after a day
+  deaddrop id                                  Show this client's id, for `serve --allow`
   deaddrop serve x.torrent --no-progress       Plain progress lines on a terminal
   deaddrop config example > ~/.config/deaddrop/config.toml
   deaddrop skill install                       Teach AI coding agents to use deaddrop
@@ -59,6 +65,9 @@ Environment variables:
   DEADDROP_KEY           Decryption key for `fetch` of --encrypt data (same as --key)
   DEADDROP_NOTIFY        Comma-separated notifiers for `serve` (same as --notify)
   DEADDROP_RESET_TOKEN   Reset token for `serve` (--reset-token) and `reset` (--token)
+  DEADDROP_ALLOW         Comma-separated client ids for `serve` (same as --allow)
+  DEADDROP_EXPIRE_AFTER  Ticket lifetime for `serve` (same as --expire-after)
+  DEADDROP_IDENTITY      Identity file for `fetch` and `id` (same as --identity)
   DEADDROP_NO_PROGRESS   `true`: plain progress lines, no bars (same as --no-progress)
   NO_COLOR               Set: no colors in progress bars or log lines
   RUST_LOG               Log filter, e.g. `info` or `deaddrop=debug,librqbit=info`
@@ -105,7 +114,9 @@ key is never written to the server's disk. The client then runs
 
 Single use (the default): one client at a time can connect. Once a client has
 everything and disconnects, the server exits. If the client drops out partway,
-another client can connect. --multi-use keeps serving until Ctrl-C.
+another client can connect. Clients turned away are told why (busy,
+already downloaded, expired, replaced, not allowed), and each is logged.
+--multi-use keeps serving until Ctrl-C.
 
 Resets: with a reset token set, anyone who has the ticket and the token can
 run `deaddrop reset <ticket> <source>` to make the server switch to a
@@ -118,8 +129,22 @@ single-use server allows one download of each torrent it switches to.
 delete the data and keep running, serving nothing, until a reset brings in
 the next torrent. Every torrent is downloaded exactly once, then deleted.
 
-Anyone with the ticket can download the data. With --encrypt, the key is
-also needed to read it. Treat both as secrets, and send them over different
+Expiry: with --expire-after <DURATION> (e.g. 30m, 24h, 7d, 1h30m), each
+ticket stops working that long after it is printed, if it hasn't been used
+up by then. No new download or listing starts after that; one already
+running may finish (Ctrl-C cuts it off). Then the data is deleted and the
+server exits, or with --wait-for-reset waits for the next reset, whose
+ticket gets the full time again. The time counts from when the ticket is
+printed, not while the torrent downloads.
+
+Allow list: with --allow <ID> (repeatable), only clients with those
+endpoint ids can download or list; everyone else is turned away right
+after the encrypted handshake, which proves the client's id. A client gets
+its id from `deaddrop id`. Resets aren't affected; they have their own
+token.
+
+Anyone with the ticket can download the data (unless --allow limits who).
+With --encrypt, the key is also needed to read it. Treat both as secrets, and send them over different
 channels when you can. --hide-key keeps the key off this machine's terminal
 and output entirely: it only goes to notifiers with include_key.";
 
@@ -132,7 +157,9 @@ Examples:
   DEADDROP_RESET_TOKEN=$(openssl rand -hex 32) deaddrop serve ./file.torrent --multi-use
   DEADDROP_RESET_TOKEN=$(openssl rand -hex 32) deaddrop serve ./file.torrent --wait-for-reset
   deaddrop serve ./file.torrent --encrypt > tickets.txt   # one `<ticket> <key>` line per ticket
-  deaddrop serve ./file.torrent --encrypt --hide-key --notify webhook+key=https://...";
+  deaddrop serve ./file.torrent --encrypt --hide-key --notify webhook+key=https://...
+  deaddrop serve ./file.torrent --expire-after 24h
+  deaddrop serve ./file.torrent --allow <id from `deaddrop id` on the client>";
 
 const NOTIFY_LONG_HELP: &str = "\
 Send the ticket somewhere once it's ready. Repeatable.
@@ -142,7 +169,8 @@ Types:
                   copyable `deaddrop fetch` command.
   webhook=<URL>   POSTs JSON: {\"event\":\"ticket_ready\", \"name\", \"ticket\",
                   \"fetch_command\", \"files\", \"total_bytes\", \"single_use\",
-                  \"reset\"}  (reset is true when it replaces an old ticket)
+                  \"reset\"}  (reset is true when it replaces an old ticket),
+                  plus \"expires_at\" (Unix seconds) with --expire-after
 
 With --encrypt, add +key to the type (discord+key=<URL>, webhook+key=<URL>)
 to also send the decryption key: Discord shows it as a spoiler, and webhook JSON gets a \"key\"
@@ -174,6 +202,13 @@ folder, and running the same command again resumes it. A single-use server
 lets the same or another client continue, as long as the download hasn't
 finished yet.
 
+A server that turns the client away says why, and fetch prints it: another
+client is downloading from this single-use server (fetch waits in case its
+download fails, up to --retry-for), the download is already done, the
+ticket expired or was replaced by a reset, or this client isn't on the
+server's allow list. Only the first is worth waiting for; the others stop
+at once.
+
 If the server used --encrypt, the files are decrypted with the key
 (DEADDROP_KEY or --key); a wrong key is an error. Without the key, the
 download is kept in the temporary folder, so running the same command again
@@ -185,13 +220,19 @@ server shut down.
 With --list, the client only prints the files and their sizes (on stdout)
 and downloads nothing. This doesn't use up a single-use server's download,
 as long as the server runs deaddrop 2.1 or later; an older one counts it as
-the download. Encrypted file names are only shown with the key.";
+the download. Encrypted file names are only shown with the key.
+
+Identity: normally each fetch connects with a new random id. Once
+`deaddrop id` has created an identity file, fetch uses it, so a server can
+allow just this client (`serve --allow <ID>`). A server that turns the
+client away makes fetch stop at once with a message saying so.";
 
 const FETCH_AFTER_HELP: &str = "\
 Examples:
   deaddrop fetch blobaa...            Write files into the current directory
   deaddrop fetch blobaa... -o ~/dl    Write files into ~/dl
   deaddrop fetch --list blobaa...     See what's in it first
+  deaddrop id                         Show the id to give a server's --allow
   export DEADDROP_KEY=AGE-SECRET-KEY-1...   For data served with --encrypt
   deaddrop fetch blobaa...";
 
@@ -224,6 +265,20 @@ Examples:
   deaddrop reset <ticket> 'magnet:?xt=urn:btih:...'
   deaddrop reset <ticket> ./other.torrent
   read -r TICKET KEY < <(deaddrop reset <ticket> https://example.com/x.torrent)";
+
+const ID_LONG_ABOUT: &str = "\
+Show this client's endpoint id, creating an identity the first time.
+
+`fetch` normally connects with a new random id each time. A server started
+with `--allow <ID>` only accepts the clients it lists, so a client that
+should be let in runs `deaddrop id` and gives the printed id to the server's
+operator. From then on `fetch` (and `fetch --list`) use this identity.
+
+The id goes on stdout; it isn't secret. The identity file holds the secret
+key that proves it (mode 600): anyone who has the file can pass as this
+client. Every server this client fetches from sees the same id, so to go
+back to random ids, delete the file (its path is printed on stderr).
+--new replaces it with a new identity.";
 
 const SKILL_LONG_ABOUT: &str = "\
 Install an Agent Skill that teaches AI coding agents (Claude Code, OpenAI
@@ -440,6 +495,34 @@ pub enum Command {
             value_name = "BOOL"
         )]
         hide_key: Option<bool>,
+
+        /// Only let clients with this endpoint id download; repeatable [config: serve.allow]
+        ///
+        /// The client gets its id from `deaddrop id`. Everyone else is turned
+        /// away right after the handshake (which proves the client's id), so a
+        /// leaked ticket is useless to them. Resets aren't affected.
+        #[arg(
+            long,
+            value_name = "ID",
+            value_hint = ValueHint::Other,
+            env = "DEADDROP_ALLOW",
+            value_delimiter = ','
+        )]
+        allow: Vec<String>,
+
+        /// Stop serving a ticket this long after it is printed, e.g. 30m, 24h, 7d [config: serve.expire_after]
+        ///
+        /// Then the data is deleted and the server exits (or, with
+        /// --wait-for-reset, waits for a reset). A download already running
+        /// may finish. Each reset's ticket gets the full time again. A bare
+        /// number is seconds; 0 or `never` turns it off.
+        #[arg(
+            long,
+            value_name = "DURATION",
+            value_hint = ValueHint::Other,
+            env = "DEADDROP_EXPIRE_AFTER"
+        )]
+        expire_after: Option<String>,
     },
 
     /// Download the files a deaddrop server is serving
@@ -476,6 +559,32 @@ pub enum Command {
         /// Each attempt only downloads what is still missing. 0 gives up on the first failure.
         #[arg(long, value_name = "SECS")]
         retry_for: Option<u64>,
+
+        /// Identity file to connect with [default: the one `deaddrop id` makes, if it exists] [config: fetch.identity]
+        #[arg(
+            long,
+            value_name = "FILE",
+            value_hint = ValueHint::FilePath,
+            env = "DEADDROP_IDENTITY"
+        )]
+        identity: Option<PathBuf>,
+    },
+
+    /// Show this client's id, for a server's --allow (creates it on first use)
+    #[command(long_about = ID_LONG_ABOUT)]
+    Id {
+        /// Identity file [default: ~/.local/share/deaddrop/identity.key on Linux] [config: fetch.identity]
+        #[arg(
+            long,
+            value_name = "FILE",
+            value_hint = ValueHint::FilePath,
+            env = "DEADDROP_IDENTITY"
+        )]
+        identity: Option<PathBuf>,
+
+        /// Replace the identity with a new one (servers that allowed the old id won't accept this client)
+        #[arg(long)]
+        new: bool,
     },
 
     /// Make a server serve a different torrent

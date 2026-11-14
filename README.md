@@ -51,6 +51,8 @@ flowchart LR
 - 🕳️ **NAT-proof transfers** – iroh punches through NATs and falls back to relays, so neither side needs an open port.
 - ✅ **Verified delivery** – every chunk is checked against its BLAKE3 hash; tampering (or a wrong key) fails loudly.
 - 💥 **Single use by default** – one client, one download, then the server shuts down (or wipes the data and waits).
+- 🎟️ **Only the right client** – `--allow <ID>` turns away everyone but the clients you name, so a leaked ticket is useless.
+- ⏳ **Expiring tickets** – `--expire-after 24h` wipes an unclaimed drop instead of leaving it on disk forever.
 - 🔄 **Hot swaps** – point a running server at a new torrent with `deaddrop reset`; the old ticket dies.
 - 🔔 **Notifications** – push tickets to Discord or any webhook, with per-notifier control over who gets the key.
 - 🧭 **See the path** – every connection reports whether it goes direct (hole-punched) or through a relay; use n0's relays, your own, or none.
@@ -165,7 +167,7 @@ See [Encryption](#encryption) for what is protected and from whom.
 
 | Flag | Meaning |
 | --- | --- |
-| `--multi-use` | Keep serving to any number of clients until Ctrl-C. Without this flag the server is **single use**: it serves one client, then deletes the data and shuts down (or, with `--wait-for-reset`, waits) once that client has the whole collection and disconnects (or 30 s after the transfer completes). While that client is connected, other clients are rejected. If the client drops out before finishing, the next client can connect. `--multi-use=false` forces single use even if the config file turns multi-use on. |
+| `--multi-use` | Keep serving to any number of clients until Ctrl-C. Without this flag the server is **single use**: it serves one client, then deletes the data and shuts down (or, with `--wait-for-reset`, waits) once that client has the whole collection and disconnects (or 30 s after the transfer completes). While that client is connected, other clients are turned away with a reason (see [When the server turns a client away](#when-the-server-turns-a-client-away)). If the client drops out before finishing, the next client can connect. `--multi-use=false` forces single use even if the config file turns multi-use on. |
 | `--data-dir <DIR>` | Keep the torrent data and blob store here. If you leave this out, deaddrop uses a temp directory and deletes it on exit. A single-use server deletes the data once its one download is done, even from a data dir; a multi-use server's data stays until a reset replaces it. |
 | `--peer <IP:PORT>` | Extra BitTorrent peer to connect to. Repeatable. Useful for private swarms. |
 | `--notify <TYPE=URL>` | Send the ticket somewhere when it's ready. Repeatable. See [Notifications](#notifications). |
@@ -173,6 +175,8 @@ See [Encryption](#encryption) for what is protected and from whom.
 | `--wait-for-reset` | Single use, needs a reset token: after the one download, delete the data and keep running until a reset brings the next torrent. See [Single use, long running](#single-use-long-running). |
 | `--encrypt` | Also age-encrypt the files before serving them, delete the plaintext, and print a decryption key. Off by default, since iroh already encrypts the connection. See [Encryption](#encryption). |
 | `--hide-key` | Only with `--encrypt`: never print the decryption key; send it only to notifiers with `include_key` (at least one is required). See [Encryption](#encryption). |
+| `--allow <ID>` | Only let this client download or list. Repeatable, or comma-separated in `DEADDROP_ALLOW`. See [Allowing only specific clients](#allowing-only-specific-clients). |
+| `--expire-after <DURATION>` | Stop serving a ticket this long after it's printed (`30m`, `24h`, `7d`, `1h30m`), then delete the data. See [Expiring tickets](#expiring-tickets). |
 | `-c, --config <FILE>` | TOML config file (works with every command). See [Config file](#config-file). |
 | `--no-progress` | Plain progress lines instead of progress bars (works with every command). See [Progress](#progress). |
 
@@ -188,6 +192,27 @@ server lets a client continue as long as its download hasn't finished. After
 a hard disconnect (the client crashed or lost its network), the server can
 take up to about 30 s to notice and free its slot; until then reconnects are
 refused and `fetch` just keeps retrying.
+
+### When the server turns a client away
+
+A server says why it won't serve a client, and `fetch` (and `fetch --list`)
+explains it instead of a bare "permission" error:
+
+| Reason | What `fetch` does |
+| --- | --- |
+| Another client is downloading from this single-use server | Says so once, then waits quietly for up to `--retry-for`, in case that download fails and the slot frees up. `--list` stops at once. If the server then disappears, `fetch` says the other download most likely finished. |
+| The single-use drop has already been downloaded | Stops at once. |
+| The ticket expired ([`--expire-after`](#expiring-tickets)) | Stops at once. |
+| The ticket was replaced by a reset | Stops at once; ask for the new ticket. |
+| The server isn't serving that ticket | Stops at once. |
+| Not on the server's allow list ([`--allow`](#allowing-only-specific-clients)) | Stops at once, and says which id to allow. |
+
+The server logs each one (`turned away <id>: <reason>`). Whoever connects
+first gets a single-use server's slot; everyone else is turned away while it
+is taken, and no data or file list reaches them. When nothing was downloaded,
+`fetch` leaves no `.deaddrop-<hash>` folder behind, and when the download can
+never be finished (already downloaded, expired, replaced) it deletes the
+partial one. Servers older than 2.1 only say "permission".
 
 To see what's in a drop before downloading it, use `fetch --list` (`-l`):
 
@@ -240,6 +265,58 @@ deaddrop reset <ticket> 'magnet:?xt=urn:btih:...'   # or an http(s) .torrent URL
   or `[reset] token` in the config file.
 - A single-use server allows one download of each torrent it switches to.
   Without `--wait-for-reset` it still exits after that download.
+
+### Allowing only specific clients
+
+Normally anyone who has the ticket can download. To let in only the people
+you mean, each of them runs `deaddrop id` once and sends you the id it
+prints:
+
+```sh
+# on the client: creates an identity the first time, prints its id
+$ deaddrop id
+aedfde36826e82dc8a3d4900dc5960d785374b4867b37c5e05e7b498b3b8414d
+
+# on the server
+deaddrop serve x.torrent --allow aedfde36826e82dc8a3d4900dc5960d785374b4867b37c5e05e7b498b3b8414d
+```
+
+The server checks the id right after the encrypted handshake, which proves
+it, and turns everyone else away before they can list or download anything.
+`fetch` then stops at once with a message saying it isn't on the allow
+list, instead of retrying. Resets aren't affected; they have their own token.
+
+- The id isn't secret. The identity file is: it holds the key that proves the
+  id (`~/.local/share/deaddrop/identity.key` on Linux, mode 600). Anyone who
+  has a copy can pass as that client.
+- Once the file exists, every `fetch` uses it, so every server you fetch from
+  sees the same id. Delete the file to go back to a new random id per fetch,
+  or keep it elsewhere and point at it only when needed with
+  `--identity <FILE>` (or `DEADDROP_IDENTITY`). `deaddrop id --new` replaces it.
+- Several `--allow` flags (or `DEADDROP_ALLOW=id1,id2`, or `allow = [...]`
+  under `[serve]`) allow several clients.
+
+### Expiring tickets
+
+A single-use drop that nobody picks up stays on the server's disk until
+someone notices. `--expire-after <DURATION>` puts a deadline on each ticket:
+
+```sh
+deaddrop serve x.torrent --expire-after 24h
+```
+
+The time counts from when the ticket is printed, not while the torrent
+downloads. When it runs out, the ticket stops working: no new download or
+listing starts. A download that is already running may finish (Ctrl-C cuts
+it off). Then the data is deleted and the server exits. With
+`--wait-for-reset`, it deletes the data and waits for the next reset instead,
+and every new ticket gets the full time again. Durations are like `90s`,
+`30m`, `24h`, `7d` or `1h30m`. A bare number is seconds, and `0` or `never`
+turns a config file's `expire_after` off.
+
+Notifiers are told when the ticket expires: Discord shows it in each
+reader's own time ("expires in 23 hours"), and webhook JSON gets
+`expires_at` (Unix seconds).
 
 ### Single use, long running
 
@@ -383,6 +460,8 @@ peers = ["192.168.1.10:6881"]
 # wait_for_reset = false                    # single use: stay up for resets
 # encrypt = false                           # true: also age-encrypt the files
 # hide_key = false                          # with encrypt: key goes only to include_key notifiers
+# allow = ["<id from `deaddrop id`>"]       # only these clients may download
+# expire_after = "24h"                      # each ticket stops working after this long
 
 # Notifiers get the ticket only; with encrypt, include_key = true also sends the decryption key.
 [[serve.notify]]
@@ -397,6 +476,7 @@ include_key = true                # this one also gets the key (default: false)
 [fetch]
 out = "/home/me/Downloads"
 # retry_for = 120                 # seconds to keep reconnecting without progress
+# identity = "~/.local/share/deaddrop/identity.key"   # default; made by `deaddrop id`
 
 [reset]
 # token = "<long random string>"           # used by `deaddrop reset`
@@ -415,7 +495,7 @@ out = "/home/me/Downloads"
 - **Precedence:** command-line flag > environment variable > config file >
   default. For lists (`peers`, `notify`) the first source that has any entries
   wins; they aren't merged.
-- **Relative paths** (`data_dir`, `out`) are resolved against the config
+- **Relative paths** (`data_dir`, `out`, `identity`) are resolved against the config
   file's directory.
 - **Typos are errors:** unknown keys or notifier types fail at startup with
   the line and column.
@@ -456,7 +536,7 @@ alone gives access, so only send it where you'd send the data.
 | Type | What it sends |
 | --- | --- |
 | `discord` | A channel message with the torrent name, size, mode and a copyable `deaddrop fetch …` command. Mentions are turned off and markdown in the name is escaped. With the key, it is shown as a spoiler, to be set as `DEADDROP_KEY`. |
-| `webhook` | `POST` with a JSON body: `{"event": "ticket_ready", "name", "ticket", "fetch_command", "files", "total_bytes", "single_use", "reset"}`, plus `"key"` for notifiers with the key. `reset` is `true` when the ticket replaces an old one after a reset. |
+| `webhook` | `POST` with a JSON body: `{"event": "ticket_ready", "name", "ticket", "fetch_command", "files", "total_bytes", "single_use", "reset"}`, plus `"key"` for notifiers with the key. `reset` is `true` when the ticket replaces an old one after a reset. With `--expire-after`, `expires_at` is when the ticket stops working (Unix seconds). |
 
 Bad notifier settings are rejected at startup, before the torrent download begins. If a
 notification fails (an error status, unreachable host, or the 15 s timeout),

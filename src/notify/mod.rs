@@ -61,6 +61,9 @@ pub struct TicketReady {
     /// True if this replaces an earlier ticket after a reset. The old ticket
     /// no longer works.
     pub reset: bool,
+    /// When the ticket stops working (Unix time, seconds), if it expires.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
     /// The decryption key. Only set for notifiers with `include_key`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
@@ -335,9 +338,11 @@ mod tests {
             total_bytes: 10,
             single_use: true,
             reset: false,
+            expires_at: None,
             key: None,
         });
         let v = serde_json::to_value(&ev).unwrap();
+        assert!(v.get("expires_at").is_none());
         assert_eq!(v["event"], "ticket_ready");
         assert_eq!(v["ticket"], "t");
         assert_eq!(v["single_use"], true);
@@ -345,5 +350,12 @@ mod tests {
         assert!(v.get("key").is_none());
         let v = serde_json::to_value(ev.with_key("K")).unwrap();
         assert_eq!(v["key"], "K");
+        let Event::TicketReady(t) = ev;
+        let ev = Event::TicketReady(TicketReady {
+            expires_at: Some(1_800_000_000),
+            ..t
+        });
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["expires_at"], 1_800_000_000u64);
     }
 }

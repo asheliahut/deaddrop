@@ -1,11 +1,11 @@
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result};
-use iroh::{RelayMode, protocol::Router};
+use iroh::{EndpointId, RelayMode, protocol::Router};
 use iroh_blobs::{
     BlobFormat, BlobsProtocol,
     api::{
@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     crypt, gate,
+    net::Refusal,
     notify::{self, BoxFuture, NotifierConfig, Notifiers},
     reset,
     torrent::{self, Source},
@@ -48,6 +49,10 @@ pub struct ServeOptions {
     pub hide_key: bool,
     /// Relay servers to use.
     pub relay: RelayMode,
+    /// If not empty, only these clients may download (or list).
+    pub allow: Vec<EndpointId>,
+    /// Stop serving each ticket this long after it is announced.
+    pub expire_after: Option<Duration>,
 }
 
 /// How often the blob store drops blobs that nothing references any more
@@ -120,6 +125,7 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
     let single_use = opts.single_use;
     let encrypt = opts.encrypt;
     let hide_key = opts.hide_key;
+    let expire_after = opts.expire_after;
     let store_dir = data_dir.join("blobs");
 
     // 1-2. Download the torrent (leech only) and import it into the store.
@@ -145,11 +151,18 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
     .await?;
 
     // 3. Serve the collection over iroh.
-    let endpoint = crate::net::bind(&opts.relay).await?;
+    let endpoint = crate::net::bind_with(&opts.relay, None, &opts.allow).await?;
+    if !opts.allow.is_empty() {
+        say!(
+            "only accepting downloads from {} allowed client(s)",
+            opts.allow.len()
+        );
+    }
     let (events, gate, mut done) =
         gate::watcher(first.root.hash(), first.total, single_use, encrypt);
     let blobs = BlobsProtocol::new(&store, Some(events));
-    let mut router = Router::builder(endpoint).accept(iroh_blobs::ALPN, blobs);
+    let mut router = Router::builder(endpoint)
+        .accept(iroh_blobs::ALPN, gate::GatedBlobs::new(blobs, gate.clone()));
     let mut jobs = None;
     if let Some(token) = opts.reset_token {
         let (handler, rx) = reset::handler(token);
@@ -160,7 +173,17 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
     router.endpoint().online().await;
 
     // 4. Print the ticket and tell anyone who should know.
-    let mut ticket = announce(&router, &first, notifiers, single_use, false, hide_key).await;
+    let mut expires = expire_after.map(Expiry::start);
+    let mut ticket = announce(
+        &router,
+        &first,
+        notifiers,
+        single_use,
+        false,
+        hide_key,
+        expires.as_ref(),
+    )
+    .await;
     if jobs.is_some() {
         say!("resets are enabled: `deaddrop reset <ticket> <source>` with the reset token");
     }
@@ -170,10 +193,27 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
     let mut pending: Option<PendingReset> = None;
     // Set when a single-use download finished and the server exits.
     let mut finished = false;
+    // Set when the ticket expired and the server exits; deleted after the
+    // loop, once a download still in progress is done.
+    let mut expired: Option<Served> = None;
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 say!("interrupted, shutting down");
+                break;
+            }
+            _ = Expiry::wait(&expires), if current.is_some() => {
+                let after = expires.take().expect("guarded").after;
+                gate.stop(Refusal::Expired);
+                let old = current.take().expect("guarded");
+                say!("ticket expired after {}; it no longer works", fmt_duration(after));
+                if opts.wait_for_reset {
+                    say!("deleting the data and waiting for a reset");
+                    say!("to serve something else: deaddrop reset {ticket} <source>");
+                    tokio::spawn(retire(old, gate.clone()));
+                    continue;
+                }
+                expired = Some(old);
                 break;
             }
             Some(root) = done.recv() => {
@@ -181,7 +221,8 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
                 if current.as_ref().map(|c| c.root.hash()) != Some(root) {
                     continue;
                 }
-                gate.set_root(None);
+                gate.stop(Refusal::Downloaded);
+                expires = None;
                 let old = current.take().expect("checked above");
                 if !opts.wait_for_reset {
                     // The data is no longer needed, even in a kept data dir.
@@ -219,7 +260,18 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
                             say!("reset: old ticket {ticket} no longer works");
                             tokio::spawn(retire(old, gate.clone()));
                         }
-                        ticket = announce(&router, &new, notifiers, single_use, true, hide_key).await;
+                        // Each ticket gets the full time.
+                        expires = expire_after.map(Expiry::start);
+                        ticket = announce(
+                            &router,
+                            &new,
+                            notifiers,
+                            single_use,
+                            true,
+                            hide_key,
+                            expires.as_ref(),
+                        )
+                        .await;
                         current = Some(new);
                         let key = if hide_key {
                             None
@@ -247,7 +299,24 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
         drop(p.work);
         remove_dir(&p.dir).await;
     }
+    // An expired ticket serves no new requests, but a download that was
+    // already running may finish (until Ctrl-C).
+    if let Some(old) = &expired
+        && gate.is_busy(old.root.hash())
+    {
+        say!("letting the download in progress finish (Ctrl-C to cut it off)");
+        tokio::select! {
+            _ = gate.wait_idle(old.root.hash()) => {}
+            _ = tokio::signal::ctrl_c() => say!("interrupted, cutting off the download"),
+        }
+    }
     router.shutdown().await.ok();
+    if let Some(old) = expired {
+        // The connections are closed, so this doesn't wait long.
+        say!("deleting the data and shutting down");
+        retire(old, gate.clone()).await;
+        finished = true;
+    }
     drop(current);
     store.shutdown().await.ok();
     if finished {
@@ -454,6 +523,7 @@ async fn announce(
     single_use: bool,
     reset: bool,
     hide_key: bool,
+    expires: Option<&Expiry>,
 ) -> BlobTicket {
     let ticket = BlobTicket::new(
         router.endpoint().addr(),
@@ -476,6 +546,12 @@ async fn announce(
     // If stdout is a closed pipe, keep serving: it was shown on stderr too.
     let shown_key = if hide_key { None } else { key.as_deref() };
     crate::print_ticket(&ticket.to_string(), shown_key).ok();
+    if let Some(e) = expires {
+        say!(
+            "this ticket expires in {}, unless it is used up first",
+            fmt_duration(e.after)
+        );
+    }
     if hide_key {
         say!(
             "the decryption key is not shown (hide_key); it goes only to notifiers with include_key"
@@ -491,6 +567,7 @@ async fn announce(
             total_bytes: served.total,
             single_use,
             reset,
+            expires_at: expires.map(|e| e.unix_secs()),
             key: None,
         });
         let sent = notifiers.send_all(&event, key.as_deref()).await;
@@ -505,10 +582,148 @@ async fn announce(
     ticket
 }
 
+/// When the current ticket stops working.
+struct Expiry {
+    /// How long tickets last.
+    after: Duration,
+    deadline: tokio::time::Instant,
+    /// The same moment on the wall clock, for notifications.
+    at: SystemTime,
+}
+
+impl Expiry {
+    fn start(after: Duration) -> Self {
+        Self {
+            after,
+            deadline: tokio::time::Instant::now() + after,
+            at: SystemTime::now() + after,
+        }
+    }
+
+    /// Resolves at the deadline; never, without one.
+    async fn wait(expiry: &Option<Self>) {
+        match expiry {
+            Some(e) => tokio::time::sleep_until(e.deadline).await,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn unix_secs(&self) -> u64 {
+        self.at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default()
+    }
+}
+
+/// Parse a duration like `90s`, `30m`, `24h`, `7d` or `1h30m`. A bare
+/// number is seconds. `0`, `never` and `off` mean no expiry (`None`).
+pub fn parse_duration(s: &str) -> Result<Option<Duration>> {
+    let s = s.trim();
+    if matches!(
+        s.to_ascii_lowercase().as_str(),
+        "0" | "never" | "off" | "none"
+    ) {
+        return Ok(None);
+    }
+    let bad = || format!("invalid duration {s:?} (use e.g. 90s, 30m, 24h, 7d or 1h30m)");
+    anyhow::ensure!(!s.is_empty(), "{}", bad());
+    let mut total: u64 = 0;
+    let mut rest = s;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        anyhow::ensure!(digits > 0, "{}", bad());
+        let n: u64 = rest[..digits].parse().with_context(bad)?;
+        rest = &rest[digits..];
+        let unit_len = rest
+            .find(|c: char| c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        let unit = match &rest[..unit_len] {
+            // A bare number is seconds, but only on its own.
+            "" if digits == s.len() => 1,
+            "s" => 1,
+            "m" => 60,
+            "h" => 60 * 60,
+            "d" => 24 * 60 * 60,
+            _ => anyhow::bail!("{}", bad()),
+        };
+        rest = &rest[unit_len..];
+        total = n
+            .checked_mul(unit)
+            .and_then(|v| total.checked_add(v))
+            .with_context(bad)?;
+    }
+    // tokio panics on deadlines too far in the future; ten years is plenty.
+    anyhow::ensure!(
+        total <= 10 * 365 * 24 * 60 * 60,
+        "duration {s:?} is too long"
+    );
+    Ok(Some(Duration::from_secs(total)))
+}
+
+/// Show a duration the way it's written: `1d2h`, `30m`, `90s` → `1m30s`.
+pub fn fmt_duration(d: Duration) -> String {
+    let mut secs = d.as_secs();
+    if secs == 0 {
+        return "0s".into();
+    }
+    let mut out = String::new();
+    for (unit, len) in [("d", 86_400), ("h", 3_600), ("m", 60), ("s", 1)] {
+        if secs >= len {
+            out.push_str(&format!("{}{unit}", secs / len));
+            secs %= len;
+        }
+    }
+    out
+}
+
 fn temp_dir() -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     std::env::temp_dir().join(format!("deaddrop-{}-{nanos}", std::process::id()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        let p = |s: &str| parse_duration(s).unwrap().map(|d| d.as_secs());
+        assert_eq!(p("90"), Some(90));
+        assert_eq!(p("90s"), Some(90));
+        assert_eq!(p("30m"), Some(1800));
+        assert_eq!(p("24h"), Some(86_400));
+        assert_eq!(p("7d"), Some(604_800));
+        assert_eq!(p("1h30m"), Some(5400));
+        assert_eq!(p(" 2d12h "), Some(216_000));
+        assert_eq!(p("0"), None);
+        assert_eq!(p("never"), None);
+        assert_eq!(p("OFF"), None);
+        for bad in [
+            "",
+            "h",
+            "5x",
+            "1h30",
+            "-5m",
+            "1.5h",
+            "30 m",
+            "99999999999999d",
+        ] {
+            assert!(parse_duration(bad).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn durations_print() {
+        let f = |s| fmt_duration(Duration::from_secs(s));
+        assert_eq!(f(90), "1m30s");
+        assert_eq!(f(86_400), "1d");
+        assert_eq!(f(93_600), "1d2h");
+        assert_eq!(f(0), "0s");
+    }
 }

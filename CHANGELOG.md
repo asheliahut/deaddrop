@@ -19,6 +19,34 @@ All notable changes to deaddrop. The format follows
 
 ### Added
 
+- **`serve --allow <ID>` lets only specific clients download.** A client
+  runs the new `deaddrop id` command once to create a persistent identity
+  and gives the printed id to the server's operator. Everyone else is turned
+  away right after the handshake, so a leaked ticket is useless to them, and
+  `fetch` stops at once with a clear message instead of retrying. Repeatable,
+  `DEADDROP_ALLOW` (comma-separated) or `serve.allow`. `fetch` uses the
+  identity once it exists (`--identity`, `DEADDROP_IDENTITY` or
+  `fetch.identity` pick another file); without one it still uses a new random
+  id each time.
+- **`serve --expire-after <DURATION>` makes tickets expire.** Each ticket
+  stops working that long after it is printed (`30m`, `24h`, `7d`, `1h30m`)
+  if it hasn't been used up. Then the data is deleted and the server exits,
+  or with `--wait-for-reset` waits for the next reset, whose ticket gets the
+  full time again. A download already running may finish. Also
+  `DEADDROP_EXPIRE_AFTER` and `serve.expire_after`. Notifications say when
+  the ticket expires: `expires_at` (Unix seconds) in webhook JSON, a
+  relative time in Discord.
+- **The server says why it turns a client away**, and `fetch` explains it
+  instead of a bare "permission" error: another client is downloading from
+  this single-use server, the drop was already downloaded, the ticket
+  expired or was replaced by a reset, or the client isn't on the allow
+  list. Only a busy slot is retried, quietly (one line, not one per
+  attempt); the others stop at once. A single-use server now refuses a
+  second client as soon as it connects. If the server disappears while a
+  client waits for a busy slot, `fetch` says the other download most likely
+  finished. The server logs every refusal, and `fetch` no longer leaves an
+  empty `.deaddrop-<hash>` folder behind, or keeps a partial download that
+  can never be finished.
 - **`fetch --list` shows what's in a drop without downloading it**: each
   file's path and size on stdout, and a total. Only the names and sizes are
   fetched, and the server doesn't count that as the single-use download, so
