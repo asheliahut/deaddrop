@@ -115,7 +115,7 @@ Apple Silicon) and Windows (x86_64 + ARM) are attached to every
 
 ```sh
 # example: Linux x86_64 (static musl build)
-VERSION=v2.0.0
+VERSION=v2.1.0
 curl -LO "https://github.com/asheliahut/deaddrop/releases/download/$VERSION/deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
 tar -xzf "deaddrop-$VERSION-x86_64-unknown-linux-musl.tar.gz"
 sudo install "deaddrop-$VERSION-x86_64-unknown-linux-musl/deaddrop" /usr/local/bin/
