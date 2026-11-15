@@ -7,6 +7,21 @@
 //! [[serve.notify]]
 //! type = "discord"
 //! url = "https://discord.com/api/webhooks/..."
+//!
+//! [[serve.notify]]
+//! type = "ntfy"
+//! url = "https://ntfy.sh/<topic>"
+//!
+//! [[serve.notify]]
+//! type = "email"
+//! url = "smtps://user:pass@smtp.example.com"
+//! from = "deaddrop@example.com"
+//! to = ["me@example.com"]
+//!
+//! [[serve.notify]]
+//! type = "telegram"
+//! bot_token = "123456789:AAE..."
+//! chat_id = -1001234567890
 //! ```
 //!
 //! or with the `--notify <type>=<url>` shorthand on the command line.
@@ -25,6 +40,13 @@
 //! `--notify <type>=<url>` shorthand works for it with no extra code.
 
 mod discord;
+mod email;
+mod mattermost;
+mod ntfy;
+mod rocketchat;
+mod slack;
+mod telegram;
+mod twilio;
 mod webhook;
 
 use std::time::Duration;
@@ -110,6 +132,121 @@ pub enum NotifierConfig {
         #[serde(default)]
         include_key: bool,
     },
+    /// Email over SMTP. `url` is the server, like `smtps://user:pass@host`.
+    Email {
+        url: String,
+        #[serde(default)]
+        include_key: bool,
+        /// The sender, `a@x.org` or `Name <a@x.org>`. Or `?from=` in the URL.
+        #[serde(default)]
+        from: Option<String>,
+        /// One recipient or a list. Or `?to=` (repeatable) in the URL.
+        #[serde(default)]
+        to: OneOrMany,
+    },
+    /// Slack incoming webhook.
+    Slack {
+        url: String,
+        #[serde(default)]
+        include_key: bool,
+    },
+    /// Mattermost incoming webhook.
+    Mattermost {
+        url: String,
+        #[serde(default)]
+        include_key: bool,
+    },
+    /// Rocket.Chat incoming webhook.
+    #[serde(alias = "rocket.chat")]
+    RocketChat {
+        url: String,
+        #[serde(default)]
+        include_key: bool,
+    },
+    /// ntfy push notification. `url` is the topic URL.
+    Ntfy {
+        url: String,
+        #[serde(default)]
+        include_key: bool,
+        /// Access token for a protected topic.
+        #[serde(default)]
+        token: Option<String>,
+        /// 1 (min) to 5 (max); ntfy's default is 3.
+        #[serde(default)]
+        priority: Option<u8>,
+    },
+    /// Telegram bot message.
+    Telegram {
+        /// From @BotFather, like `123456789:AAE...`.
+        bot_token: String,
+        /// `-1001234567890`, `123456789` or `@channelname`.
+        chat_id: ChatId,
+        #[serde(default)]
+        include_key: bool,
+        /// Topic (forum thread) to post in.
+        #[serde(default)]
+        thread_id: Option<i64>,
+        /// A self-hosted Bot API server instead of api.telegram.org.
+        #[serde(default)]
+        api_url: Option<String>,
+    },
+    /// SMS through Twilio.
+    Twilio {
+        /// `AC...` from the Twilio console.
+        account_sid: String,
+        /// The account's Auth Token, or the API key's secret with `api_key`.
+        auth_token: String,
+        /// An API key SID (`SK...`) to log in with instead of the account.
+        #[serde(default)]
+        api_key: Option<String>,
+        /// A Twilio number (`+15551234567`), alphanumeric sender id, or
+        /// Messaging Service SID (`MG...`).
+        from: String,
+        /// The phone number to text, in E.164 form.
+        to: String,
+        #[serde(default)]
+        include_key: bool,
+        /// Another Twilio API host, e.g. a regional one.
+        #[serde(default)]
+        api_url: Option<String>,
+    },
+}
+
+/// One string or a list of them in the config.
+#[derive(Clone, Default, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    #[default]
+    None,
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    fn to_vec(&self) -> Vec<String> {
+        match self {
+            Self::None => Vec::new(),
+            Self::One(s) => vec![s.clone()],
+            Self::Many(v) => v.clone(),
+        }
+    }
+}
+
+/// A Telegram chat id, written as a number or a string in the config.
+#[derive(Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ChatId {
+    Number(i64),
+    Text(String),
+}
+
+impl ChatId {
+    fn to_text(&self) -> String {
+        match self {
+            Self::Number(n) => n.to_string(),
+            Self::Text(s) => s.clone(),
+        }
+    }
 }
 
 // Hand-written so secrets (webhook URLs) never show up in debug output.
@@ -118,6 +255,13 @@ impl std::fmt::Debug for NotifierConfig {
         let kind = match self {
             Self::Discord { .. } => "discord",
             Self::Webhook { .. } => "webhook",
+            Self::Email { .. } => "email",
+            Self::Slack { .. } => "slack",
+            Self::Mattermost { .. } => "mattermost",
+            Self::RocketChat { .. } => "rocketchat",
+            Self::Ntfy { .. } => "ntfy",
+            Self::Telegram { .. } => "telegram",
+            Self::Twilio { .. } => "twilio",
         };
         let key = if self.include_key() { ", with key" } else { "" };
         write!(f, "NotifierConfig({kind}{key}, <redacted>)")
@@ -126,8 +270,9 @@ impl std::fmt::Debug for NotifierConfig {
 
 impl NotifierConfig {
     /// Parse the CLI shorthand `<type>=<url>`, or `<type>+key=<url>` to also
-    /// send the decryption key. Errors don't echo the input, since it may
-    /// contain a secret.
+    /// send the decryption key. Telegram takes `<bot_token>@<chat_id>` and
+    /// Twilio `<account_sid>:<auth_token>@<from>/<to>` instead of a URL. Errors don't echo the input, since it may contain a
+    /// secret.
     pub fn parse_shorthand(spec: &str) -> Result<Self> {
         let Some((kind, url)) = spec.split_once('=') else {
             bail!("expected <type>=<url>, e.g. discord=https://discord.com/api/webhooks/...");
@@ -137,18 +282,58 @@ impl NotifierConfig {
             Some(k) => (k.to_string(), true),
             None => (kind, false),
         };
-        let value = serde_json::json!({
-            "type": kind,
-            "url": url.trim(),
-            "include_key": include_key,
-        });
+        let value = if kind == "telegram" {
+            let Some((bot_token, chat_id)) = url.trim().split_once('@') else {
+                bail!(
+                    "expected telegram=<bot_token>@<chat_id>, e.g. telegram=123456:AAE...@-1001234567890"
+                );
+            };
+            serde_json::json!({
+                "type": kind,
+                "bot_token": bot_token,
+                "chat_id": chat_id,
+                "include_key": include_key,
+            })
+        } else if kind == "twilio" {
+            let parsed = url
+                .trim()
+                .split_once('@')
+                .and_then(|(auth, route)| Some((auth.split_once(':')?, route.split_once('/')?)));
+            let Some(((account_sid, auth_token), (from, to))) = parsed else {
+                bail!(
+                    "expected twilio=<account_sid>:<auth_token>@<from>/<to>, e.g. twilio=AC...:token@+15550001111/+15552223333"
+                );
+            };
+            serde_json::json!({
+                "type": kind,
+                "account_sid": account_sid,
+                "auth_token": auth_token,
+                "from": from,
+                "to": to,
+                "include_key": include_key,
+            })
+        } else {
+            serde_json::json!({
+                "type": kind,
+                "url": url.trim(),
+                "include_key": include_key,
+            })
+        };
         serde_json::from_value(value).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Whether this notifier should receive the decryption key.
     pub fn include_key(&self) -> bool {
         match self {
-            Self::Discord { include_key, .. } | Self::Webhook { include_key, .. } => *include_key,
+            Self::Discord { include_key, .. }
+            | Self::Webhook { include_key, .. }
+            | Self::Email { include_key, .. }
+            | Self::Slack { include_key, .. }
+            | Self::Mattermost { include_key, .. }
+            | Self::RocketChat { include_key, .. }
+            | Self::Ntfy { include_key, .. }
+            | Self::Telegram { include_key, .. }
+            | Self::Twilio { include_key, .. } => *include_key,
         }
     }
 
@@ -156,6 +341,59 @@ impl NotifierConfig {
         Ok(match self {
             Self::Discord { url, .. } => Box::new(discord::Discord::new(url, http.clone())?),
             Self::Webhook { url, .. } => Box::new(webhook::Webhook::new(url, http.clone())?),
+            Self::Slack { url, .. } => Box::new(slack::Slack::new(url, http.clone())?),
+            Self::Mattermost { url, .. } => {
+                Box::new(mattermost::Mattermost::new(url, http.clone())?)
+            }
+            Self::RocketChat { url, .. } => {
+                Box::new(rocketchat::RocketChat::new(url, http.clone())?)
+            }
+            Self::Email { url, from, to, .. } => {
+                Box::new(email::Email::new(url, from.as_deref(), &to.to_vec())?)
+            }
+            Self::Ntfy {
+                url,
+                token,
+                priority,
+                ..
+            } => Box::new(ntfy::Ntfy::new(
+                url,
+                token.as_deref(),
+                *priority,
+                http.clone(),
+            )?),
+            Self::Telegram {
+                bot_token,
+                chat_id,
+                thread_id,
+                api_url,
+                ..
+            } => Box::new(telegram::Telegram::new(
+                bot_token,
+                &chat_id.to_text(),
+                *thread_id,
+                api_url.as_deref(),
+                http.clone(),
+            )?),
+            Self::Twilio {
+                account_sid,
+                auth_token,
+                api_key,
+                from,
+                to,
+                api_url,
+                ..
+            } => Box::new(twilio::Twilio::new(
+                twilio::Settings {
+                    account_sid,
+                    auth_token,
+                    api_key: api_key.as_deref(),
+                    from,
+                    to,
+                    api_url: api_url.as_deref(),
+                },
+                http.clone(),
+            )?),
         })
     }
 }
@@ -262,6 +500,19 @@ pub struct Sent {
     pub with_key: usize,
 }
 
+/// The current Unix time in seconds.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+/// How long until `at` (Unix seconds), like `23h59m`.
+fn time_left(at: u64, now: u64) -> String {
+    crate::server::fmt_duration(Duration::from_secs(at.saturating_sub(now)))
+}
+
 /// Parse and check an http(s) URL. Errors don't include the URL.
 fn parse_http_url(s: &str) -> Result<reqwest::Url> {
     let url = reqwest::Url::parse(s).map_err(|e| anyhow::anyhow!("invalid URL: {e}"))?;
@@ -278,9 +529,12 @@ async fn post_json(
     url: &reqwest::Url,
     body: &impl Serialize,
 ) -> Result<()> {
-    let resp = http
-        .post(url.clone())
-        .json(body)
+    send_checked(http.post(url.clone()).json(body)).await
+}
+
+/// Send a request and turn non-2xx responses into errors, without the URL.
+async fn send_checked(req: reqwest::RequestBuilder) -> Result<()> {
+    let resp = req
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("{}", e.without_url()))?;
@@ -316,6 +570,30 @@ mod tests {
                 .include_key()
         );
         assert!(ok("DISCORD=https://discord.com/api/webhooks/1/abc"));
+        assert!(ok("slack=https://hooks.slack.com/services/T0/B0/x"));
+        assert!(ok("slack+key=https://hooks.slack.com/services/T0/B0/x"));
+        assert!(ok("mattermost=https://mm.example.com/hooks/x"));
+        assert!(ok("rocketchat+key=https://chat.example.com/hooks/id/tok"));
+        assert!(ok("Rocket.Chat=https://chat.example.com/hooks/id/tok"));
+        assert!(ok("ntfy=https://ntfy.sh/deaddrop-x1"));
+        assert!(ok(
+            "email=smtps://u:p@smtp.example.com?from=a@x.org&to=b@y.org"
+        ));
+        assert!(ok(
+            "email+key=smtp://u:p@smtp.example.com?from=a@x.org&to=b@y.org&to=c@z.org"
+        ));
+        assert!(!ok("email=smtps://u:p@smtp.example.com"));
+        assert!(ok("ntfy+key=https://user:pass@ntfy.example.com/drops"));
+        assert!(!ok("ntfy=https://ntfy.sh/"));
+        assert!(ok("telegram=123456:AAE-x_y@-1001234567890"));
+        assert!(ok("telegram+key=123456:AAE-x_y@@my_channel"));
+        assert!(!ok("telegram=123456:AAE-x_y"));
+        assert!(!ok("telegram=https://api.telegram.org/bot1:a/sendMessage"));
+        let ac = "AC0123456789abcdef0123456789abcdef";
+        assert!(ok(&format!("twilio={ac}:tok@+15550001111/+15552223333")));
+        assert!(ok(&format!("twilio+key={ac}:tok@Deaddrop/+447700900123")));
+        assert!(!ok(&format!("twilio={ac}:tok@+15550001111")));
+        assert!(!ok(&format!("twilio={ac}@+15550001111/+15552223333")));
         assert!(!ok("webhook"));
         assert!(!ok("carrier-pigeon=https://x"));
         assert!(!ok("webhook=ftp://example.com"));
@@ -325,6 +603,33 @@ mod tests {
     #[test]
     fn debug_redacts_secrets() {
         let c = NotifierConfig::parse_shorthand("discord=https://x/SECRET").unwrap();
+        assert!(!format!("{c:?}").contains("SECRET"));
+        let c: NotifierConfig = toml::from_str(
+            "type = \"ntfy\"\nurl = \"https://ntfy.sh/SECRET\"\ntoken = \"tk_TOKEN\"",
+        )
+        .unwrap();
+        let dbg = format!("{c:?}");
+        assert!(!dbg.contains("SECRET") && !dbg.contains("TOKEN"));
+        for chat in ["-100123", "\"@chan_nel\""] {
+            let c: NotifierConfig = toml::from_str(&format!(
+                "type = \"telegram\"\nbot_token = \"1:SECRET\"\nchat_id = {chat}"
+            ))
+            .unwrap();
+            assert!(!format!("{c:?}").contains("SECRET"));
+            assert!(c.build(&reqwest::Client::new()).is_ok());
+        }
+        for to in ["\"b@y.org\"", "[\"b@y.org\", \"Bee <c@z.org>\"]"] {
+            let c: NotifierConfig = toml::from_str(&format!(
+                "type = \"email\"\nurl = \"smtps://u:SECRET@h\"\nfrom = \"a@x.org\"\nto = {to}"
+            ))
+            .unwrap();
+            assert!(!format!("{c:?}").contains("SECRET"));
+            assert!(c.build(&reqwest::Client::new()).is_ok());
+        }
+        let c = NotifierConfig::parse_shorthand(
+            "twilio=AC0123456789abcdef0123456789abcdef:SECRET@+15550001111/+15552223333",
+        )
+        .unwrap();
         assert!(!format!("{c:?}").contains("SECRET"));
     }
 

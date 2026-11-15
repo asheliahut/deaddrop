@@ -205,10 +205,40 @@ Types:
                   \"fetch_command\", \"files\", \"total_bytes\", \"single_use\",
                   \"reset\"}  (reset is true when it replaces an old ticket),
                   plus \"expires_at\" (Unix seconds) with --expire-after
+  email=<URL>     Email over SMTP, e.g.
+                  email=smtps://user:pass@smtp.example.com?from=me@x.org&to=you@y.org
+                  smtps:// is TLS (port 465); smtp:// requires STARTTLS
+                  (port 587), or add tls=none for a local relay. to= is
+                  repeatable. Percent-encode @ : / in the user or password.
+  slack=<URL>     Slack incoming webhook. Posts the same as Discord.
+  mattermost=<URL>
+                  Mattermost incoming webhook. Posts the same as Discord.
+  rocketchat=<URL>
+                  Rocket.Chat incoming webhook. Posts the same as Discord.
+  ntfy=<URL>      ntfy push notification to a topic URL, like
+                  https://ntfy.sh/<topic> or a self-hosted server. Use
+                  user:pass@ in the URL, or a token in the config file, for
+                  protected topics.
+  telegram=<BOT_TOKEN>@<CHAT_ID>
+                  Telegram bot message, e.g.
+                  telegram=123456:AAE...@-1001234567890 (or @channelname as
+                  the chat). thread_id and api_url go in the config file.
+  twilio=<ACCOUNT_SID>:<AUTH_TOKEN>@<FROM>/<TO>
+                  SMS through Twilio, e.g.
+                  twilio=AC...:token@+15550001111/+15552223333. FROM is a
+                  Twilio number, alphanumeric sender id or Messaging Service
+                  (MG...); TO is the phone number to text. api_key and
+                  api_url go in the config file.
 
 With --encrypt, add +key to the type (discord+key=<URL>, webhook+key=<URL>)
-to also send the decryption key: Discord shows it as a spoiler, and webhook JSON gets a \"key\"
-field. Without +key a notifier only gets the ticket. In the config file, set
+to also send the decryption key: Discord shows it as a spoiler, webhook JSON gets a \"key\"
+field, email, Slack, Mattermost, Rocket.Chat, ntfy and Twilio add it to the
+message, and Telegram shows it
+as a spoiler.
+Email and SMS aren't end-to-end encrypted, so think twice before email+key
+or twilio+key.
+On a public ntfy server anyone who guesses the topic can read it, so only use
+ntfy+key with a protected topic or your own server. Without +key a notifier only gets the ticket. In the config file, set
 include_key = true.
 
 Webhook URLs are secrets. To keep them out of shell history and `ps`, set
@@ -477,7 +507,7 @@ pub enum Command {
         #[arg(long = "peer", value_name = "IP:PORT")]
         peers: Vec<SocketAddr>,
 
-        /// Send the ticket to discord=<URL> or webhook=<URL> (+key: with --encrypt, the key too); repeatable [config: serve.notify]
+        /// Send the ticket to discord=<URL>, email=<SMTP_URL>, slack=<URL>, mattermost=<URL>, rocketchat=<URL>, webhook=<URL>, ntfy=<URL>, telegram=<BOT_TOKEN>@<CHAT_ID> or twilio=<SID>:<TOKEN>@<FROM>/<TO> (+key: with --encrypt, the key too); repeatable [config: serve.notify]
         #[arg(
             long,
             value_name = "TYPE=URL",

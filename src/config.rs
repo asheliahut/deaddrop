@@ -227,7 +227,7 @@ mod tests {
     fn full_example_parses() {
         let c = parse(EXAMPLE).unwrap();
         assert_eq!(c.serve.multi_use, Some(false));
-        assert_eq!(c.serve.notify.len(), 2);
+        assert_eq!(c.serve.notify.len(), 9);
     }
 
     #[test]

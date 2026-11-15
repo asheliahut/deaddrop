@@ -38,7 +38,12 @@ repeat them back unless the user asks:
 - **Decryption keys** (`AGE-SECRET-KEY-1...`): needed to read data served
   with `--encrypt`.
 - **Reset tokens**: let anyone with a ticket switch the server's torrent.
-- **Webhook URLs** (Discord or other): anyone with one can post there.
+- **Webhook URLs** (Discord, Slack, Mattermost, Rocket.Chat or other): anyone with one can post there.
+- **Telegram bot tokens**: anyone with one controls the bot.
+- **SMTP URLs** (`smtps://user:pass@...`): they hold the mail password.
+- **Twilio auth tokens**: anyone with one can send SMS on the account's bill.
+- **ntfy topic URLs and tokens**: on a public ntfy server, anyone who knows
+  the topic can read what is sent to it.
 
 Pass secrets through environment variables instead of flags, so they stay out
 of shell history and `ps`: `DEADDROP_KEY`, `DEADDROP_RESET_TOKEN`,
@@ -96,8 +101,26 @@ Send the ticket somewhere when it's ready:
 DEADDROP_NOTIFY='discord=https://discord.com/api/webhooks/<id>/<token>' deaddrop serve ...
 ```
 
-The types are `discord=<URL>` and `webhook=<URL>` (JSON POST). Add `+key`
-(`webhook+key=<URL>`) to also send the decryption key. The list is
+The types are `discord=<URL>`, `email=<SMTP URL>`, `slack=<URL>`, `mattermost=<URL>`,
+`rocketchat=<URL>` (incoming webhooks),
+`webhook=<URL>` (JSON POST) and `ntfy=<URL>`
+(a topic URL like `https://ntfy.sh/<topic>`; `user:pass@` in the URL or
+`token = "tk_..."` in the config for protected topics, optional
+`priority = 1..5`). Add `+key` (`webhook+key=<URL>`) to also send the
+decryption key; for ntfy only do that with a protected topic or a
+self-hosted server. Telegram is `telegram=<bot_token>@<chat_id>` (chat id a
+number or `@channelname`); in the config it is `bot_token`, `chat_id`, and
+optional `thread_id` and `api_url`. Twilio SMS is
+`twilio=<account_sid>:<auth_token>@<from>/<to>` (`from`: Twilio number, sender
+id or `MG...` Messaging Service; `to`: E.164 like `+15552223333`; one notifier
+per recipient); in the config it is `account_sid`, `auth_token`, `from`, `to`,
+and optional `api_key` (`SK...`) and `api_url`. SMS isn't end-to-end
+encrypted, so avoid `+key` on it. Email is
+`email=smtps://user:pass@host?from=a@x.org&to=b@y.org` (`smtps://` is TLS,
+`smtp://` requires STARTTLS, `?tls=none` only for a local relay; `to=`
+repeatable; percent-encode `@ : /` in credentials); in the config `from` and
+`to` (string or list) can be separate keys. Email isn't end-to-end encrypted
+either. The list is
 comma-separated. A failed notification is a warning; the server keeps
 serving.
 
@@ -189,7 +212,7 @@ Follow these steps when the user asks to configure deaddrop:
      (`reset_token`), and should it `wait_for_reset`?
    - Server: is age encryption wanted (`encrypt`)? If so, should the key be
      printed or only sent to notifiers (`hide_key`)?
-   - Server: where should tickets go (Discord or webhook notifiers), and which
+   - Server: where should tickets go (Discord, Slack, Mattermost, Rocket.Chat, Telegram, ntfy, email, Twilio SMS or webhook notifiers), and which
      of them should get the key (`include_key`)?
    - Client: where should downloads go (`fetch.out`)?
    - Relays: n0's public relays (default), the user's own (`[relay] urls`),

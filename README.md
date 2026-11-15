@@ -55,7 +55,7 @@ flowchart LR
 - ⏳ **Expiring tickets** – `--expire-after 24h` wipes an unclaimed drop instead of leaving it on disk forever.
 - 📁 **Not just torrents** – serve local files and directories in place, whatever is piped into stdin, or a file the server downloads over http(s).
 - 🔄 **Hot swaps** – point a running server at a new torrent with `deaddrop reset`; the old ticket dies.
-- 🔔 **Notifications** – push tickets to Discord or any webhook, with per-notifier control over who gets the key.
+- 🔔 **Notifications** – push tickets to Discord, Slack, Mattermost, Rocket.Chat, Telegram, ntfy, email (SMTP), SMS (Twilio) or any webhook, with per-notifier control over who gets the key.
 - 🧭 **See the path** – every connection reports whether it goes direct (hole-punched) or through a relay; use n0's relays, your own, or none.
 - 📊 **Progress bars** – for the torrent, each transfer on the server, and the client download, with plain lines for logs, pipes and `--no-progress`.
 - 🧩 **Script friendly** – the ticket (and key, with `--encrypt`, unless `--hide-key`) on stdout, everything else on stderr, TOML config, shell completions.
@@ -533,7 +533,14 @@ The server can send the ticket out when it's ready:
 
 ```sh
 deaddrop serve x.torrent --notify discord=https://discord.com/api/webhooks/<id>/<token>
+deaddrop serve x.torrent --notify 'email=smtps://user:pass@smtp.example.com?from=me@example.com&to=you@example.com'
+deaddrop serve x.torrent --notify slack=https://hooks.slack.com/services/<T…>/<B…>/<secret>
+deaddrop serve x.torrent --notify mattermost=https://mattermost.example.com/hooks/<key>
+deaddrop serve x.torrent --notify rocketchat=https://chat.example.com/hooks/<id>/<token>
 deaddrop serve x.torrent --notify webhook=https://example.com/hooks/deaddrop
+deaddrop serve x.torrent --notify ntfy=https://ntfy.sh/<long-random-topic>
+deaddrop serve x.torrent --notify telegram=<bot_token>@<chat_id>
+deaddrop serve x.torrent --notify twilio=<account_sid>:<auth_token>@<from>/<to>
 ```
 
 Webhook URLs usually contain a secret. To keep them out of shell history and
@@ -559,6 +566,13 @@ alone gives access, so only send it where you'd send the data.
 | Type | What it sends |
 | --- | --- |
 | `discord` | A channel message with the torrent name, size, mode and a copyable `deaddrop fetch …` command. Mentions are turned off and markdown in the name is escaped. With the key, it is shown as a spoiler, to be set as `DEADDROP_KEY`. |
+| `email` | A plain-text email over SMTP with the name, size, mode, expiry and the `deaddrop fetch …` command. The URL is the server: `smtps://` uses TLS from the start (port 465), and `smtp://` requires STARTTLS (port 587). Add `?tls=opportunistic` to allow a server without STARTTLS, or `?tls=none` for a local relay; deaddrop refuses to send a password without TLS unless the server is on localhost. Put the sender and recipients in the query string (`?from=me@example.com&to=a@example.com&to=b@example.com`), or as `from` and `to` (one address or a list) in its `[[serve.notify]]` table. Addresses can be `Name <a@example.com>`. Percent-encode `@`, `:` and `/` in the user name or password. With the key, it is added as `DEADDROP_KEY=…`, but email isn't end-to-end encrypted, so prefer another notifier for the key. |
+| `slack` | A message to a Slack [incoming webhook](https://api.slack.com/messaging/webhooks) with the name, size, mode and the `deaddrop fetch …` command in a code block. The expiry is shown in each reader's time zone. Link and mention markup in the name is escaped, and link previews are off. With the key, it is added as inline code (Slack has no spoilers). |
+| `mattermost` | A message to a Mattermost [incoming webhook](https://developers.mattermost.com/integrate/webhooks/incoming/) with the name, size, mode, expiry and the `deaddrop fetch …` command in a code block. Markdown in the name is escaped, and `@` mentions in it (like `@channel`) are broken up so they don't ping anyone. With the key, it is added as inline code. |
+| `rocketchat` | A message to a Rocket.Chat [incoming webhook](https://docs.rocket.chat/docs/integrations) with the name as an attachment title (plain text, so it can't contain markup or mentions) and the size, mode, expiry and `deaddrop fetch …` command below it. `rocket.chat` works as the type too. With the key, it is added as inline code. |
+| `ntfy` | A push notification to an [ntfy](https://ntfy.sh) topic (ntfy.sh or self-hosted): the name as the title, then the size, mode, expiry and the `deaddrop fetch …` command. The URL is the topic URL. For a protected topic, put `user:pass@` in the URL or set `token = "tk_…"` in its `[[serve.notify]]` table; `priority = 1`–`5` is optional. With the key, it is added to the message. On a public server anyone who knows the topic can read it, so use a long random topic name, and send the key only to a protected topic or your own server. |
+| `telegram` | A message from your Telegram bot with the name, size, mode, expiry and the `deaddrop fetch …` command in a copyable block. The shorthand is `telegram=<bot_token>@<chat_id>`: the token from [@BotFather](https://t.me/BotFather), and the chat id as a number (`-1001234567890`) or `@channelname`. In a `[[serve.notify]]` table these are `bot_token` and `chat_id`, plus optional `thread_id` (a forum topic) and `api_url` (a self-hosted Bot API server). With the key, it is shown as a spoiler. |
+| `twilio` | An SMS through [Twilio](https://www.twilio.com/docs/messaging) with the name, size, mode, expiry and the `deaddrop fetch …` command, in plain text so it fits in as few SMS segments as possible. The shorthand is `twilio=<account_sid>:<auth_token>@<from>/<to>`, where `from` is a Twilio number, an alphanumeric sender id (in countries that allow them) or a Messaging Service SID (`MG…`), and `to` is an E.164 number like `+15552223333`. Use one notifier per recipient. In a `[[serve.notify]]` table these are `account_sid`, `auth_token`, `from` and `to`, plus optional `api_key` (an `SK…` API key, with its secret as `auth_token`) and `api_url`. With the key, it is added as `DEADDROP_KEY=…`, but SMS isn't end-to-end encrypted, so prefer another notifier for the key. |
 | `webhook` | `POST` with a JSON body: `{"event": "ticket_ready", "name", "ticket", "fetch_command", "files", "total_bytes", "single_use", "reset"}`, plus `"key"` for notifiers with the key. `reset` is `true` when the ticket replaces an old one after a reset. With `--expire-after`, `expires_at` is when the ticket stops working (Unix seconds). |
 
 Bad notifier settings are rejected at startup, before the torrent download begins. If a
@@ -568,17 +582,18 @@ locally. Logs never include webhook URLs.
 
 ### Adding a notifier
 
-Notifiers live in `src/notify/`. To add one, for example Slack:
+Notifiers live in `src/notify/`. To add one, for example Matrix:
 
-1. Create `src/notify/slack.rs` with a struct that implements the `Notifier`
-   trait (`label()` and `send(&Event)`).
-2. Register it in `src/notify/mod.rs`: add `mod slack;`, add a
-   `Slack { ... }` variant to `NotifierConfig` with the settings it needs,
+1. Create `src/notify/matrix.rs` with a struct that implements the `Notifier`
+   trait (`label()` and `send(&Event)`). `slack.rs` is a short one to copy.
+2. Register it in `src/notify/mod.rs`: add `mod matrix;`, add a
+   `Matrix { ... }` variant to `NotifierConfig` with the settings it needs,
    and add an arm to the `match` in `NotifierConfig::build`.
 
 The variant's fields are what users write in their `[[serve.notify]]` table
-(`type = "slack"` plus those fields). If its main setting is called `url`, the
-`--notify slack=<url>` shorthand works with no extra code.
+(`type = "matrix"` plus those fields). If its main setting is called `url`, the
+`--notify matrix=<url>` shorthand works with no extra code. Otherwise, add a
+case to `NotifierConfig::parse_shorthand`, as Telegram and Twilio do.
 
 New kinds of events (e.g. "client finished downloading") are variants of the
 `Event` enum, and each notifier decides how to render them.

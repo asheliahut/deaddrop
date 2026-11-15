@@ -19,6 +19,43 @@ All notable changes to deaddrop. The format follows
 
 ### Added
 
+- **Mattermost and Rocket.Chat notifiers.** `--notify mattermost=<URL>` and
+  `--notify rocketchat=<URL>` (or `type = "mattermost"` / `"rocketchat"` in
+  `[[serve.notify]]`) post the ticket to an incoming webhook, with the fetch
+  command in a code block. Names can't ping anyone: Mattermost gets escaped
+  Markdown with `@` mentions broken up, and Rocket.Chat shows the name as a
+  plain-text attachment title. `+key` / `include_key` adds the decryption key.
+- **Email notifier.** `--notify
+  'email=smtps://user:pass@smtp.example.com?from=me@x.org&to=you@y.org'` (or
+  `type = "email"` with `url`, `from` and `to` in `[[serve.notify]]`) emails
+  the ticket and fetch command over SMTP. `smtps://` uses TLS from the start
+  and `smtp://` requires STARTTLS; `?tls=none` is for local relays, and a
+  password is never sent without TLS except to localhost. `to` takes several
+  recipients. `+key` / `include_key` adds the decryption key, though email
+  isn't end-to-end encrypted.
+- **Slack notifier.** `--notify slack=<incoming webhook URL>` (or
+  `type = "slack"` in `[[serve.notify]]`) posts the ticket to a Slack
+  channel, with the fetch command in a code block and the expiry in each
+  reader's time zone. `+key` / `include_key` adds the decryption key.
+- **Twilio SMS notifier.** `--notify
+  twilio=<account_sid>:<auth_token>@<from>/<to>` (or `type = "twilio"` in
+  `[[serve.notify]]`) texts the ticket and fetch command to a phone number.
+  `from` can be a Twilio number, an alphanumeric sender id or a Messaging
+  Service; `api_key` logs in with a Twilio API key and `api_url` picks
+  another API host. `+key` / `include_key` adds the decryption key, though
+  SMS isn't end-to-end encrypted.
+- **Telegram notifier.** `--notify telegram=<bot_token>@<chat_id>` (or
+  `type = "telegram"` with `bot_token` and `chat_id` in `[[serve.notify]]`)
+  sends the ticket as a message from your bot, with the fetch command in a
+  copyable block. Optional `thread_id` posts in a forum topic and `api_url`
+  uses a self-hosted Bot API server. `+key` / `include_key` adds the
+  decryption key as a spoiler.
+- **ntfy notifier.** `--notify ntfy=https://ntfy.sh/<topic>` (or
+  `type = "ntfy"` in `[[serve.notify]]`) sends the ticket as a push
+  notification to an [ntfy](https://ntfy.sh) topic, on ntfy.sh or a
+  self-hosted server. Protected topics take `user:pass@` in the URL or a
+  `token`, and `priority` (1-5) is optional. `+key` / `include_key` adds the
+  decryption key to the message.
 - **`serve` can serve more than torrents.** `SOURCE` can now also be:
   - **local files and directories** (one or more): served where they are,
     never moved, changed or deleted, also with `--encrypt` and after a
