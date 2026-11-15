@@ -3,12 +3,12 @@
 
 use std::{
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
 
-use crate::ui;
+use crate::{source::Entry, ui};
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressStyle};
 use librqbit::{
@@ -16,20 +16,13 @@ use librqbit::{
     SessionOptions, api::TorrentIdOrHash,
 };
 
-/// One file from a finished torrent.
-pub struct DownloadedFile {
-    /// Path relative to the download dir. For a multi-file torrent this starts
-    /// with the torrent's name.
-    pub name: String,
-    /// Absolute path on disk.
-    pub path: PathBuf,
-}
-
 /// A finished torrent download.
 pub struct Download {
     /// The torrent's display name (or its info hash if it has none).
     pub name: String,
-    pub files: Vec<DownloadedFile>,
+    /// Named by their path relative to the download dir. For a multi-file
+    /// torrent this starts with the torrent's name.
+    pub files: Vec<Entry>,
 }
 
 /// Largest .torrent file we accept, locally or from a reset request.
@@ -186,7 +179,7 @@ pub async fn download(source: Source, dir: &Path, peers: Vec<SocketAddr>) -> Res
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
-            Ok(DownloadedFile { name, path })
+            Ok(Entry { name, path })
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Download { name, files })

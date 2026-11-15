@@ -30,8 +30,8 @@
 
 ---
 
-A server downloads a torrent **without seeding it**, then hands the files to a
-client over [iroh](https://iroh.computer) (end-to-end encrypted peer-to-peer
+A server downloads a torrent **without seeding it** (or takes local files,
+stdin, or an http(s) download), then hands the files to a client over [iroh](https://iroh.computer) (end-to-end encrypted peer-to-peer
 QUIC with NAT traversal and relay fallback). With `--encrypt`, the files are
 also [age](https://age-encryption.org)-encrypted at rest.
 
@@ -53,6 +53,7 @@ flowchart LR
 - 💥 **Single use by default** – one client, one download, then the server shuts down (or wipes the data and waits).
 - 🎟️ **Only the right client** – `--allow <ID>` turns away everyone but the clients you name, so a leaked ticket is useless.
 - ⏳ **Expiring tickets** – `--expire-after 24h` wipes an unclaimed drop instead of leaving it on disk forever.
+- 📁 **Not just torrents** – serve local files and directories in place, whatever is piped into stdin, or a file the server downloads over http(s).
 - 🔄 **Hot swaps** – point a running server at a new torrent with `deaddrop reset`; the old ticket dies.
 - 🔔 **Notifications** – push tickets to Discord or any webhook, with per-notifier control over who gets the key.
 - 🧭 **See the path** – every connection reports whether it goes direct (hole-punched) or through a relay; use n0's relays, your own, or none.
@@ -152,9 +153,12 @@ deaddrop serve https://example.com/x.torrent      # .torrent URLs and local .tor
 deaddrop serve file.torrent --multi-use           # keep serving to any number of clients until Ctrl-C
 deaddrop serve file.torrent --wait-for-reset      # one download per torrent, then wait for the next (needs a reset token)
 deaddrop serve file.torrent --encrypt             # also age-encrypt the files; prints a decryption key
+deaddrop serve ./photos notes.txt                 # local files and directories, served where they are
+tar c dir | deaddrop serve - --name dir.tar       # whatever is piped in, as one file
+deaddrop serve https://example.com/x.iso          # the server downloads it, then serves it
 ```
 
-When the torrent finishes, the server prints a ticket. On the client:
+When the data is ready, the server prints a ticket. On the client:
 
 ```sh
 deaddrop fetch <ticket> -o ./downloads
@@ -163,12 +167,28 @@ export DEADDROP_KEY=AGE-SECRET-KEY-1...           # only for --encrypt: the key 
 
 See [Encryption](#encryption) for what is protected and from whom.
 
+### What `serve` can serve
+
+| `SOURCE` | What happens |
+| --- | --- |
+| `magnet:?...` | Downloaded as a torrent, leech only, then the torrent session is shut down. |
+| `x.torrent`, `https://.../x.torrent` | A local `.torrent` file, or an http(s) URL whose path ends in `.torrent`: a torrent too. |
+| `FILE` or `DIR` (one or more) | Served where they are. deaddrop never moves, changes or deletes them, also not with `--encrypt` (the encrypted copies go in the data dir) or after a single-use download. A directory keeps its name as the top folder. Symlinks inside directories, special files and empty folders are skipped. Don't change the files while they're served: the client checks every chunk and would reject the download. They can't be inside the data dir. |
+| `-` | Reads stdin into one file, named by `--name` (default `stdin`). |
+| any other `https://...` / `http://...` | The server downloads it and serves it as one file, named by `--name`, the `Content-Disposition` file name, or the URL's last part. If the response is a `.torrent` file (by `Content-Type`, or by its contents), that torrent is downloaded instead, so tracker links like `download.php?id=…` keep working. |
+
+`--as-is` turns the torrent detection off: a local `.torrent` file or a URL is
+served as a plain file. Resets only ever take torrents (see
+[Resetting a server](#resetting-a-server)).
+
 ### `serve` options
 
 | Flag | Meaning |
 | --- | --- |
 | `--multi-use` | Keep serving to any number of clients until Ctrl-C. Without this flag the server is **single use**: it serves one client, then deletes the data and shuts down (or, with `--wait-for-reset`, waits) once that client has the whole collection and disconnects (or 30 s after the transfer completes). While that client is connected, other clients are turned away with a reason (see [When the server turns a client away](#when-the-server-turns-a-client-away)). If the client drops out before finishing, the next client can connect. `--multi-use=false` forces single use even if the config file turns multi-use on. |
-| `--data-dir <DIR>` | Keep the torrent data and blob store here. If you leave this out, deaddrop uses a temp directory and deletes it on exit. A single-use server deletes the data once its one download is done, even from a data dir; a multi-use server's data stays until a reset replaces it. |
+| `--name <NAME>` | File name for stdin (`-`) or an http(s) download. |
+| `--as-is` | Serve a `.torrent` file or URL as a plain file instead of downloading the torrent. |
+| `--data-dir <DIR>` | Keep downloaded data and the blob store here. If you leave this out, deaddrop uses a temp directory and deletes it on exit. A single-use server deletes the data once its one download is done, even from a data dir; a multi-use server's data stays until a reset replaces it. |
 | `--peer <IP:PORT>` | Extra BitTorrent peer to connect to. Repeatable. Useful for private swarms. |
 | `--notify <TYPE=URL>` | Send the ticket somewhere when it's ready. Repeatable. See [Notifications](#notifications). |
 | `--reset-token <TOKEN>` | Let `deaddrop reset` switch the server to a different torrent. See [Resetting a server](#resetting-a-server). Prefer `DEADDROP_RESET_TOKEN` or the config file. |
@@ -246,7 +266,10 @@ deaddrop reset <ticket> 'magnet:?xt=urn:btih:...'   # or an http(s) .torrent URL
 
 - The source can be a magnet URI, an http(s) URL (the server fetches it), or
   a local `.torrent` file (its contents are sent to the server). The server
-  never treats a reset source as a path on its own disk.
+  never treats a reset source as a path on its own disk, and a reset only
+  ever brings in a torrent, even on a server that started with local files,
+  stdin or an http(s) download: a reset token holder can't make the server
+  read its files or fetch arbitrary URLs for them.
 - The server keeps serving the current torrent while the new one downloads.
   If the download fails, nothing changes and `reset` reports the error.
 - Once the new torrent is ready, the server prints the new ticket (and, with

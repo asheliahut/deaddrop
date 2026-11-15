@@ -1,5 +1,5 @@
-//! deaddrop: fetch a torrent on a server (without seeding it), then hand the
-//! data to a client over iroh.
+//! deaddrop: get data onto a server (a torrent without seeding it, local
+//! files, stdin or an http(s) download), then hand it to a client over iroh.
 
 #[macro_use]
 mod ui;
@@ -14,6 +14,7 @@ mod notify;
 mod reset;
 mod server;
 mod skill;
+mod source;
 mod torrent;
 
 use std::time::Duration;
@@ -88,6 +89,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Serve {
             source,
+            name,
+            as_is,
             multi_use,
             data_dir,
             peers,
@@ -121,7 +124,7 @@ async fn main() -> Result<()> {
                 parse_notify_flags(&notify)?
             };
             server::run(server::ServeOptions {
-                source: torrent::Source::from_arg(&source)?,
+                source: source::Source::from_args(&source, name, as_is)?,
                 single_use: !multi_use.or(file.multi_use).unwrap_or(false),
                 data_dir: data_dir.or(file.data_dir),
                 peers: if peers.is_empty() { file.peers } else { peers },

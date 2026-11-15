@@ -26,7 +26,8 @@ use crate::{
     net::Refusal,
     notify::{self, BoxFuture, NotifierConfig, Notifiers},
     reset,
-    torrent::{self, Source},
+    source::{self, Source},
+    torrent,
 };
 
 pub struct ServeOptions {
@@ -90,6 +91,12 @@ pub async fn run(mut opts: ServeOptions) -> Result<()> {
         Some(d) => (d, false),
         None => (temp_dir(), true),
     };
+    // Absolute, so local paths can be checked against it: deaddrop deletes
+    // things in its data dir, so it must never serve files from there.
+    tokio::fs::create_dir_all(&data_dir)
+        .await
+        .with_context(|| format!("can't create the data dir {}", data_dir.display()))?;
+    let data_dir = tokio::fs::canonicalize(&data_dir).await?;
     let res = serve(opts, &notifiers, &data_dir).await;
     if ephemeral && let Err(e) = tokio::fs::remove_dir_all(&data_dir).await {
         say!("warning: failed to remove {}: {e}", data_dir.display());
@@ -97,7 +104,8 @@ pub async fn run(mut opts: ServeOptions) -> Result<()> {
     res
 }
 
-/// A torrent that has been downloaded and imported, ready to serve.
+/// Data that has been downloaded (or found on disk) and imported, ready to
+/// serve.
 struct Served {
     name: String,
     files: usize,
@@ -106,8 +114,12 @@ struct Served {
     root: TempTag,
     /// Keep the file blobs alive in the store.
     tags: Vec<TempTag>,
-    /// Where the torrent's files are on disk.
+    /// deaddrop's working dir for this data (downloads, encrypted copies).
+    /// Deleted on retire. Local files served in place are never in here.
     dir: PathBuf,
+    /// Whether the served files are deaddrop's own (a torrent, stdin, a
+    /// download) rather than the user's files, served in place.
+    owned: bool,
     /// Decrypts this collection, if it is encrypted. Only kept in memory.
     key: Option<crypt::Key>,
 }
@@ -147,6 +159,7 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
         data_dir.join("torrent"),
         &opts.peers,
         encrypt,
+        data_dir,
     )
     .await?;
 
@@ -247,7 +260,7 @@ async fn serve(opts: ServeOptions, notifiers: &Notifiers, data_dir: &Path) -> Re
                 pending = Some(PendingReset {
                     reply,
                     _busy: busy,
-                    work: Box::pin(prepare_reset(&store, source, dir.clone(), &opts.peers, encrypt)),
+                    work: Box::pin(prepare_reset(&store, source, dir.clone(), &opts.peers, encrypt, data_dir)),
                     dir,
                 });
             }
@@ -335,31 +348,40 @@ async fn recv_job(jobs: &mut Option<mpsc::Receiver<reset::Job>>) -> Option<reset
     }
 }
 
-/// Download a torrent and import it into the store, encrypted or not.
+/// Get the source's files and import them into the store, encrypted or not.
 ///
-/// Layout under `dir`: `plain/` holds the torrent download. Without
-/// encryption the store references those files in place. With encryption,
-/// `plain/` is deleted as soon as the files are encrypted (or encryption
-/// fails), and `enc/` holds one age file per torrent file, which the store
-/// references in place.
+/// Layout under `dir`: `plain/` holds what deaddrop downloads (a torrent,
+/// stdin, an http(s) file); local files are served from where they are and
+/// never copied there. Without encryption the store references the files in
+/// place. With encryption, `plain/` is deleted as soon as the files are
+/// encrypted (or encryption fails), and `enc/` holds one age file per file,
+/// which the store references in place. The user's own files are left
+/// alone either way.
 async fn prepare(
     store: &FsStore,
     source: Source,
     dir: PathBuf,
     peers: &[SocketAddr],
     encrypt: bool,
+    data_dir: &Path,
 ) -> Result<Served> {
     let plain = dir.join("plain");
-    let torrent::Download { name, files } =
-        torrent::download(source, &plain, peers.to_vec()).await?;
-    if files.is_empty() {
+    let fetched = match source::fetch(source, &plain, peers, data_dir).await {
+        Ok(f) => f,
+        Err(e) => {
+            // Don't leave a partial download in a kept data dir.
+            remove_dir(&plain).await;
+            return Err(e);
+        }
+    };
+    if fetched.files.is_empty() {
         remove_dir(&plain).await;
-        anyhow::bail!("the torrent has no files");
+        anyhow::bail!("nothing to serve: {} has no files", fetched.name);
     }
     if !encrypt {
-        return import_plain(store, name, files, dir).await;
+        return import_plain(store, fetched, dir).await;
     }
-    let res = encrypt_and_import(store, name, files, dir).await;
+    let res = encrypt_and_import(store, fetched, dir).await;
     // Never leave plaintext behind, whether or not encryption worked.
     remove_dir(&plain).await;
     res
@@ -367,12 +389,8 @@ async fn prepare(
 
 /// Import the downloaded files as they are, as a collection named with
 /// their real paths. The files stay on disk until the collection is retired.
-async fn import_plain(
-    store: &FsStore,
-    name: String,
-    files: Vec<torrent::DownloadedFile>,
-    dir: PathBuf,
-) -> Result<Served> {
+async fn import_plain(store: &FsStore, fetched: source::Fetched, dir: PathBuf) -> Result<Served> {
+    let source::Fetched { name, files, owned } = fetched;
     let mut tags: Vec<TempTag> = Vec::with_capacity(files.len());
     let mut collection = Collection::default();
     let mut total = 0u64;
@@ -401,16 +419,17 @@ async fn import_plain(
         root,
         tags,
         dir,
+        owned,
         key: None,
     })
 }
 
 async fn encrypt_and_import(
     store: &FsStore,
-    name: String,
-    files: Vec<torrent::DownloadedFile>,
+    fetched: source::Fetched,
     dir: PathBuf,
 ) -> Result<Served> {
+    let source::Fetched { name, files, owned } = fetched;
     let enc = dir.join("enc");
     // Left over from an earlier run with the same data dir.
     remove_dir(&enc).await;
@@ -429,9 +448,12 @@ async fn encrypt_and_import(
             move || crypt::encrypt_file(&recipient, &src, &dst)
         })
         .await??;
-        // Delete each plaintext file as soon as it is encrypted, so the
-        // extra disk space needed is about one file.
-        tokio::fs::remove_file(&f.path).await.ok();
+        // Delete each downloaded plaintext file as soon as it is encrypted,
+        // so the extra disk space needed is about one file. The user's own
+        // files are never deleted.
+        if owned {
+            tokio::fs::remove_file(&f.path).await.ok();
+        }
         // TryReference keeps the encrypted file in place instead of copying.
         let tag = store
             .blobs()
@@ -466,23 +488,35 @@ async fn encrypt_and_import(
         root,
         tags,
         dir,
+        owned,
         key: Some(key),
     })
 }
 
 /// Like [`prepare`], but starts from an empty directory and removes it again
-/// if the download fails.
+/// if the download fails. Resets only ever bring in torrents: a reset
+/// request must not make the server read its own files or fetch arbitrary
+/// URLs.
 async fn prepare_reset(
     store: &FsStore,
-    source: Source,
+    source: torrent::Source,
     dir: PathBuf,
     peers: &[SocketAddr],
     encrypt: bool,
+    data_dir: &Path,
 ) -> Result<Served> {
     say!("reset: downloading a {}", source.describe());
     // Left over from an earlier run with the same data dir; never served now.
     remove_dir(&dir).await;
-    let res = prepare(store, source, dir.clone(), peers, encrypt).await;
+    let res = prepare(
+        store,
+        Source::Torrent(source),
+        dir.clone(),
+        peers,
+        encrypt,
+        data_dir,
+    )
+    .await;
     if res.is_err() {
         remove_dir(&dir).await;
     }
@@ -499,12 +533,17 @@ async fn retire(old: Served, gate: gate::Gate) {
         tags,
         dir,
         name,
+        owned,
         ..
     } = old;
     drop(root);
     drop(tags);
     remove_dir(&dir).await;
-    say!("deleted the files of {name}");
+    if owned {
+        say!("deleted the files of {name}");
+    } else {
+        say!("stopped serving {name} (the original files are left as they are)");
+    }
 }
 
 async fn remove_dir(dir: &Path) {

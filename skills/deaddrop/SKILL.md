@@ -1,6 +1,6 @@
 ---
 name: deaddrop
-description: Use the deaddrop CLI to hand files from a server to another machine peer to peer. It downloads a torrent on a server without seeding it, serves the files over iroh (end-to-end encrypted QUIC), and fetches them on a client with a ticket. Use when the user mentions deaddrop, has a deaddrop ticket (a long string starting with "blob"), wants to get a torrent's files onto another machine without seeding, or wants to set up, reset or configure a deaddrop server (notifiers, age encryption, relays).
+description: Use the deaddrop CLI to hand files from a server to another machine peer to peer. It downloads a torrent on a server without seeding it (or takes local files, stdin or an http(s) download), serves the files over iroh (end-to-end encrypted QUIC), and fetches them on a client with a ticket. Use when the user mentions deaddrop, has a deaddrop ticket (a long string starting with "blob"), wants to get a torrent's files onto another machine without seeding, wants to send local files, piped output or a downloaded file to another machine, or wants to set up, reset or configure a deaddrop server (notifiers, age encryption, relays).
 metadata:
   generated-by: deaddrop
   version: "2.0.0"
@@ -8,7 +8,7 @@ metadata:
 
 # deaddrop
 
-deaddrop moves a torrent's files from a server to one client:
+deaddrop moves files from a server to one client (shown here with a torrent):
 
 1. On the server, `deaddrop serve <source>` downloads the torrent in
    leech-only mode (nothing is uploaded to the swarm), shuts the torrent
@@ -17,8 +17,13 @@ deaddrop moves a torrent's files from a server to one client:
    peer over iroh, downloads the files and checks every chunk against its
    BLAKE3 hash.
 
-`<source>` is a magnet URI, an http(s) URL of a `.torrent` file, or a path to
-a local `.torrent` file. Run `deaddrop --version` first: this skill is for
+`<source>` is a magnet URI, a local `.torrent` file or http(s) URL ending in
+`.torrent` (downloaded as a torrent); one or more local files or directories
+(served in place, never changed or deleted); `-` for stdin (one file, named
+by `--name`); or any other http(s) URL, which the server downloads and serves
+as one file (`--name` sets its name; a response that is a `.torrent` file is
+downloaded as a torrent unless `--as-is`). `deaddrop reset` only takes
+torrents. Run `deaddrop --version` first: this skill is for
 deaddrop 2.0.0. Run `deaddrop <command> --help` for the full details of
 any command.
 

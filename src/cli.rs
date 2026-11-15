@@ -6,16 +6,18 @@ use clap::{Args, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
 use iroh_blobs::ticket::BlobTicket;
 
-const ABOUT: &str =
-    "Download a torrent on a server without seeding it, then hand the files to a client over iroh.";
+const ABOUT: &str = "Get files onto a server (a torrent without seeding it, local files, stdin or an \
+     http(s) download), then hand them to a client over iroh.";
 
 const LONG_ABOUT: &str = "\
-Download a torrent on a server without seeding it, then hand the files to a client over iroh.
+Get files onto a server, then hand them to a client over iroh.
 
 A dead drop in two steps:
-  1. On the server, `deaddrop serve <magnet|.torrent>` downloads the torrent in
-     leech-only mode (nothing is uploaded to the swarm), stops the torrent
-     session, and prints a ticket.
+  1. On the server, `deaddrop serve <SOURCE>` gets the data and prints a
+     ticket. SOURCE is a torrent (magnet, .torrent file or URL), downloaded
+     in leech-only mode (nothing is uploaded to the swarm) and then stopped;
+     local files or directories, served where they are; `-` for stdin; or
+     an http(s) URL, which the server downloads.
   2. On the client, `deaddrop fetch <ticket>` connects to the server peer to
      peer over iroh (end-to-end encrypted QUIC with NAT traversal and relay
      fallback), downloads the files, and checks every chunk against its
@@ -34,6 +36,9 @@ const MAIN_AFTER_HELP: &str = "\
 Examples:
   deaddrop serve 'magnet:?xt=urn:btih:...'     Download, serve once, then exit
   deaddrop serve ./file.torrent --multi-use    Keep serving until Ctrl-C
+  deaddrop serve ./photos notes.txt            Serve local files and directories
+  tar c dir | deaddrop serve - --name dir.tar  Serve what's piped in
+  deaddrop serve https://example.com/x.iso     Download a file, then serve it
   deaddrop fetch <ticket>                      Get the files
   deaddrop serve --encrypt ./file.torrent      Also age-encrypt; prints a key
   deaddrop reset <ticket> 'magnet:?xt=...'     Make a server serve another torrent
@@ -50,6 +55,9 @@ const MAIN_AFTER_LONG_HELP: &str = "\
 Examples:
   deaddrop serve 'magnet:?xt=urn:btih:...'     Download, serve once, then exit
   deaddrop serve ./file.torrent --multi-use    Keep serving until Ctrl-C
+  deaddrop serve ./photos notes.txt            Serve local files and directories
+  tar c dir | deaddrop serve - --name dir.tar  Serve what's piped in
+  deaddrop serve https://example.com/x.iso     Download a file, then serve it
   deaddrop fetch <ticket>                      Get the files
   deaddrop serve --encrypt ./file.torrent      Also age-encrypt; prints a key
   deaddrop reset <ticket> 'magnet:?xt=...'     Make a server serve another torrent
@@ -94,22 +102,42 @@ Exit status:
   download, and Ctrl-C), 1 on error, 2 on bad command-line usage.";
 
 const SERVE_LONG_ABOUT: &str = "\
-Download a torrent (leech only, no seeding), then serve its contents over iroh.
+Get data onto this machine (or use files already here), then serve it over iroh.
+
+Sources:
+  magnet:...            A torrent: downloaded leech only, then stopped.
+  x.torrent, URL        A local .torrent file, or an http(s) URL ending in
+                        .torrent: a torrent too.
+  FILE or DIR ...       Served where they are, never moved, changed or
+                        deleted. A directory is served with its name as the
+                        top folder; symlinks inside it, special files and
+                        empty folders are skipped. Several can be given.
+                        Don't change them while they're served: the client
+                        checks every chunk and would reject the download.
+  -                     Reads stdin into one file (--name, default `stdin`).
+  https://...           Any other http(s) URL: the server downloads it and
+                        serves it as one file, named by --name, the name the
+                        web server sends, or the URL's last part. If the
+                        response is a .torrent file, that torrent is
+                        downloaded instead, unless --as-is.
+--as-is serves a .torrent file or URL as a plain file.
 
 What happens:
-  1. The torrent is downloaded with uploading disabled and no incoming
-     BitTorrent listener, so nothing is seeded.
-  2. When it finishes, the torrent session is shut down (DHT, trackers, peers).
-  3. The files are added to an iroh blob store (by reference, not copied)
+  1. A torrent is downloaded with uploading disabled and no incoming
+     BitTorrent listener, so nothing is seeded. When it finishes, the
+     torrent session is shut down (DHT, trackers, peers). Stdin and http(s)
+     downloads are saved in the data dir.
+  2. The files are added to an iroh blob store (by reference, not copied)
      and served as one collection. iroh encrypts the connection end to end.
-  4. A ticket is printed and sent to any configured notifiers. Give it to the
+  3. A ticket is printed and sent to any configured notifiers. Give it to the
      client: `deaddrop fetch <ticket>`.
 
---encrypt adds age encryption at rest: in step 3 each file is first
-encrypted with a new age (X25519) key and the plaintext is deleted, and file
-names are only stored inside an encrypted manifest. In step 4 the decryption
-key is printed too, and sent only to notifiers with `+key` / include_key. The
-key is never written to the server's disk. The client then runs
+--encrypt adds age encryption at rest: in step 2 each file is first
+encrypted with a new age (X25519) key and the downloaded plaintext is
+deleted (local files are left as they are), and file names are only stored
+inside an encrypted manifest. In step 3 the decryption key is printed too,
+and sent only to notifiers with `+key` / include_key. The key is never
+written to the server's disk. The client then runs
 `DEADDROP_KEY=<key> deaddrop fetch <ticket>`.
 
 Single use (the default): one client at a time can connect. Once a client has
@@ -120,10 +148,12 @@ already downloaded, expired, replaced, not allowed), and each is logged.
 
 Resets: with a reset token set, anyone who has the ticket and the token can
 run `deaddrop reset <ticket> <source>` to make the server switch to a
-different torrent. The server keeps serving the old one while the new one
-downloads, then prints and sends out a new ticket. The old ticket stops
-working, and the old files are deleted once nobody is downloading them. A
-single-use server allows one download of each torrent it switches to.
+different torrent (resets only take torrents, whatever the first source
+was). The server keeps serving the old one while the new one downloads,
+then prints and sends out a new ticket. The old ticket stops working, and
+the old files are deleted once nobody is downloading them (local files
+served in place are left as they are). A single-use server allows one
+download of each torrent it switches to.
 
 --wait-for-reset (single use, needs a reset token): after the one download,
 delete the data and keep running, serving nothing, until a reset brings in
@@ -152,6 +182,10 @@ const SERVE_AFTER_HELP: &str = "\
 Examples:
   deaddrop serve 'magnet:?xt=urn:btih:...'
   deaddrop serve https://example.com/file.torrent --multi-use
+  deaddrop serve ~/videos/talk.mp4 ./slides
+  pg_dump mydb | deaddrop serve - --name mydb.sql --encrypt
+  deaddrop serve 'https://example.com/download?id=42' --name report.pdf
+  deaddrop serve ./file.torrent --as-is                   # the .torrent file itself
   deaddrop serve ./file.torrent --data-dir /srv/deaddrop
   deaddrop serve ./file.torrent --notify discord=https://discord.com/api/webhooks/<id>/<token>
   DEADDROP_RESET_TOKEN=$(openssl rand -hex 32) deaddrop serve ./file.torrent --multi-use
@@ -239,10 +273,14 @@ Examples:
 const RESET_LONG_ABOUT: &str = "\
 Make a server switch to a different torrent.
 
-The server must be running with a reset token, and you need both a ticket it
-handed out (an old one is fine) and that token. SOURCE can be a magnet URI, an http(s) URL of
-a .torrent file (the server fetches it), or a local .torrent file (its contents
-are sent to the server).
+The server must be running with a reset token, and you need both a ticket
+it handed out (an old one is fine) and that token. SOURCE can be a magnet
+URI, an http(s) URL of a .torrent file (the server fetches it), or a local
+.torrent file (its contents are sent to the server).
+
+Resets only take torrents, even on a server that started with local files,
+stdin or an http(s) download: a reset must not make the server read its own
+files or fetch arbitrary URLs.
 
 While the new torrent downloads, the server keeps serving the old one. When it
 is ready, the server switches over, prints the new ticket and sends it to its
@@ -387,12 +425,27 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Download a torrent without seeding it, then serve the files over iroh
+    /// Serve a torrent (downloaded without seeding), local files, stdin or an http(s) download
     #[command(long_about = SERVE_LONG_ABOUT, after_help = SERVE_AFTER_HELP)]
     Serve {
-        /// Magnet URI, http(s) URL of a .torrent file, or path to a local .torrent file
-        #[arg(value_name = "SOURCE", value_hint = ValueHint::FilePath)]
-        source: String,
+        /// What to serve: a magnet URI or .torrent file/URL, local files or directories, `-` for stdin, or an http(s) URL to download
+        ///
+        /// A magnet URI, a local `*.torrent` file or an http(s) URL ending in
+        /// `.torrent` is downloaded as a torrent. Any other local file or
+        /// directory is served where it is (several can be given). `-` reads
+        /// stdin into one file. Any other http(s) URL is downloaded by the
+        /// server and served as one file, or as a torrent if the response is
+        /// a .torrent file (use --as-is to serve it as a file instead).
+        #[arg(value_name = "SOURCE", value_hint = ValueHint::AnyPath, num_args = 1.., required = true)]
+        source: Vec<String>,
+
+        /// File name for stdin (`-`) or an http(s) download [default: `stdin`; for a download, the name the web server sends or the URL's last part]
+        #[arg(long, value_name = "NAME", value_hint = ValueHint::Other)]
+        name: Option<String>,
+
+        /// Serve a .torrent file or downloaded URL as a file, instead of downloading the torrent it describes
+        #[arg(long)]
+        as_is: bool,
 
         /// Keep serving to any number of clients until Ctrl-C [config: serve.multi_use]
         ///
@@ -408,12 +461,13 @@ pub enum Command {
         )]
         multi_use: Option<bool>,
 
-        /// Keep torrent data and the blob store here [config: serve.data_dir]
+        /// Keep downloaded data and the blob store here [config: serve.data_dir]
         ///
         /// If you leave this out, deaddrop uses a temporary directory and deletes
         /// it on exit. With a data dir, a multi-use server's data stays after
         /// exit; a single-use server always deletes the data once its one
-        /// download is done.
+        /// download is done. Local files being served are never deleted, and
+        /// can't be inside the data dir.
         #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         data_dir: Option<PathBuf>,
 

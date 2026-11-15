@@ -19,6 +19,23 @@ All notable changes to deaddrop. The format follows
 
 ### Added
 
+- **`serve` can serve more than torrents.** `SOURCE` can now also be:
+  - **local files and directories** (one or more): served where they are,
+    never moved, changed or deleted, also with `--encrypt` and after a
+    single-use download. A directory keeps its name as the top folder;
+    symlinks inside it, special files and empty folders are skipped.
+  - **`-` for stdin**, saved as one file named by `--name` (default
+    `stdin`).
+  - **any http(s) URL**, which the server downloads and serves as one file
+    (named by `--name`, `Content-Disposition` or the URL). A response that is
+    a `.torrent` file (by `Content-Type` or its contents) is still downloaded
+    as a torrent, so tracker links without `.torrent` in the URL work as
+    before.
+
+  `--as-is` serves a `.torrent` file or URL as a plain file. Magnet URIs,
+  local `.torrent` files and URLs ending in `.torrent` work as before. Resets
+  still only take torrents, so a reset token can't make the server read its
+  own files or fetch arbitrary URLs.
 - **`serve --allow <ID>` lets only specific clients download.** A client
   runs the new `deaddrop id` command once to create a persistent identity
   and gives the printed id to the server's operator. Everyone else is turned
