@@ -726,6 +726,7 @@ two files of work.
 - [librqbit](https://github.com/ikatson/rqbit): the BitTorrent engine
 - [age](https://github.com/str4d/rage): optional file encryption
 - [indicatif](https://github.com/console-rs/indicatif): progress bars
+- [lettre](https://github.com/lettre/lettre): SMTP email notifications
 - [clap](https://github.com/clap-rs/clap), [tokio](https://tokio.rs), and the rest of the Rust ecosystem
 
 ## 📜 License
