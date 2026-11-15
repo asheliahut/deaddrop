@@ -52,13 +52,18 @@ fn render(event: &Event) -> String {
             } else {
                 ""
             };
+            // Discord shows <t:...:R> as "in 5 hours" in each reader's own time.
+            let expires = match t.expires_at {
+                Some(at) => format!("\n⏳ The ticket expires <t:{at}:R>."),
+                None => String::new(),
+            };
             // A spoiler, so the key isn't readable at a glance.
             let key = match &t.key {
                 Some(k) => format!("\n🔑 Decryption key (set as DEADDROP_KEY): ||`{k}`||"),
                 None => String::new(),
             };
             let msg = format!(
-                "📦 **{}** is ready ({} file(s), {}, {mode}){reset}\n```\n{}\n```{key}",
+                "📦 **{}** is ready ({} file(s), {}, {mode}){reset}{expires}\n```\n{}\n```{key}",
                 // Shorten the name, not the message, so the ticket is never cut off.
                 escape(&truncate(t.name.clone(), 300)),
                 t.files,

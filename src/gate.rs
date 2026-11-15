@@ -8,25 +8,34 @@
 //!   them to end before deleting a collection.
 //!
 //! Single use additionally:
-//! - Only one client connection is allowed at a time; others are rejected.
+//! - Only one client connection is allowed at a time; others are turned
+//!   away as soon as they connect (by [`GatedBlobs`]).
 //! - Once that client has the whole collection and disconnects (or
 //!   [`CLOSE_GRACE`] after it has everything), the gate reports the root as
 //!   finished and rejects every later connection until a new root is set.
 //! - If the client goes away before finishing, the slot opens up again.
 //!
-//! Size probes (see [`size_probe`]) are answered but never count as a
-//! finished download, so a client can learn the total size first.
+//! Every client that is turned away gets a [`Refusal`] saying why, as the
+//! connection's close code: the slot is busy, the download is done, the
+//! ticket expired or was replaced by a reset, or it was never served here.
+//!
+//! Peeks (see [`is_peek`]) are answered but never count as a finished
+//! download, so a client can learn the total size and list the files first.
 //!
 //! Each download gets a progress bar (or plain lines when stderr isn't a
 //! terminal).
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
+use iroh::{
+    endpoint::Connection,
+    protocol::{AcceptError, ProtocolHandler},
+};
 use iroh_blobs::{
-    Hash,
+    BlobsProtocol, Hash,
     protocol::{ChunkRanges, ChunkRangesExt, ChunkRangesSeq},
     provider::events::{
         AbortReason, ConnectMode, EventMask, EventSender, ObserveMode, ProviderMessage,
@@ -35,12 +44,38 @@ use iroh_blobs::{
 };
 use tokio::sync::{mpsc, watch};
 
-use crate::{torrent::human, ui};
+use crate::{net::Refusal, torrent::human, ui};
 
 /// The ranges `iroh_blobs::get::request::get_hash_seq_and_sizes` asks for:
 /// the whole hash seq and the last chunk (a size proof) of every child.
 pub fn size_probe() -> ChunkRangesSeq {
     ChunkRangesSeq::from_ranges_infinite([ChunkRanges::all(), ChunkRanges::last_chunk()])
+}
+
+/// The ranges `deaddrop fetch --list` asks for to read the file names: the
+/// hash seq and the collection's metadata blob (its names).
+pub fn names_probe() -> ChunkRangesSeq {
+    ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::all()])
+}
+
+/// The ranges `deaddrop fetch --list` asks for to read an encrypted
+/// collection's real names: the hash seq and the manifest (its first file).
+pub fn manifest_probe() -> ChunkRangesSeq {
+    ChunkRangesSeq::from_ranges([ChunkRanges::all(), ChunkRanges::empty(), ChunkRanges::all()])
+}
+
+/// Whether a request only reads a collection's metadata, so it must not
+/// count as the single-use download: a [`size_probe`], or a finite request
+/// for nothing but the hash seq, the metadata blob and, if `encrypted`, the
+/// manifest. Never any file data (the manifest only holds encrypted names).
+fn is_peek(ranges: &ChunkRangesSeq, encrypted: bool) -> bool {
+    if *ranges == size_probe() {
+        return true;
+    }
+    // In the request, 0 is the hash seq, 1 the metadata blob and 2 the
+    // first file (the manifest of an encrypted collection).
+    let last = if encrypted { 2 } else { 1 };
+    !ranges.is_infinite() && ranges.iter_non_empty_infinite().all(|(i, _)| i <= last)
 }
 
 /// How long to wait for a single-use client to close the connection after
@@ -50,6 +85,8 @@ const CLOSE_GRACE: Duration = Duration::from_secs(30);
 #[derive(Debug)]
 struct State {
     single_use: bool,
+    /// Whether collections are encrypted (their first file is the manifest).
+    encrypted: bool,
     /// The collection being served, if any.
     root: Option<Hash>,
     /// Its size in bytes, for progress bars.
@@ -60,6 +97,59 @@ struct State {
     conn: Option<u64>,
     /// Single use: the root that connection has fully downloaded.
     completed: Option<Hash>,
+    /// Why nothing is served, while `root` is `None`.
+    gone: Refusal,
+    /// Why each earlier root stopped being served.
+    retired: HashMap<Hash, Refusal>,
+    /// Admitted connections, to close with a reason if they ask for
+    /// something they can't have.
+    conns: HashMap<u64, Connection>,
+}
+
+impl State {
+    /// Stop serving the current root, if any, for `why`.
+    fn retire(&mut self, why: Refusal) {
+        if let Some(old) = self.root.take() {
+            self.retired.insert(old, why);
+        }
+        self.gone = why;
+        self.total = 0;
+        self.conn = None;
+        self.completed = None;
+    }
+
+    /// Whether a new connection may come in, and if so, take the single-use
+    /// slot for it.
+    fn admit(&mut self, conn: &Connection) -> Result<(), Refusal> {
+        if self.root.is_none() {
+            return Err(self.gone);
+        }
+        if self.single_use {
+            if self.completed.is_some() {
+                return Err(Refusal::Downloaded);
+            }
+            if self.conn.is_some() {
+                return Err(Refusal::Busy);
+            }
+            self.conn = Some(conn.stable_id() as u64);
+        }
+        self.conns.insert(conn.stable_id() as u64, conn.clone());
+        Ok(())
+    }
+
+    /// Why a `get` for `hash` on connection `conn` is refused.
+    fn refusal(&self, hash: Hash, conn: u64) -> Refusal {
+        if self.root != Some(hash) {
+            self.retired.get(&hash).copied().unwrap_or(Refusal::Unknown)
+        } else if self.completed.is_some() {
+            Refusal::Downloaded
+        } else if self.conn != Some(conn) {
+            Refusal::Busy
+        } else {
+            // Not reached: an allowed request isn't refused.
+            Refusal::Unknown
+        }
+    }
 }
 
 /// Handle for changing the served root and waiting on transfers.
@@ -72,11 +162,22 @@ impl Gate {
     /// new download.
     pub fn set_root(&self, root: Option<(Hash, u64)>) {
         self.0.send_modify(|s| {
+            s.retire(Refusal::Replaced);
             s.root = root.map(|(hash, _)| hash);
             s.total = root.map_or(0, |(_, total)| total);
-            s.conn = None;
-            s.completed = None;
         });
+    }
+
+    /// Stop serving the current root because of `why` (its single-use
+    /// download is done, or it expired). Clients asking for it from now on
+    /// are told so.
+    pub fn stop(&self, why: Refusal) {
+        self.0.send_modify(|s| s.retire(why));
+    }
+
+    /// Whether transfers of `root` are in flight.
+    pub fn is_busy(&self, root: Hash) -> bool {
+        self.0.borrow().active.contains_key(&root)
     }
 
     /// Wait until no transfers of `root` are in flight.
@@ -86,20 +187,58 @@ impl Gate {
     }
 }
 
+/// The blobs protocol behind the gate: turns clients away with a
+/// [`Refusal`] before iroh-blobs sees them, which can only say
+/// "permission".
+#[derive(Debug, Clone)]
+pub struct GatedBlobs {
+    blobs: BlobsProtocol,
+    gate: Gate,
+}
+
+impl GatedBlobs {
+    pub fn new(blobs: BlobsProtocol, gate: Gate) -> Self {
+        Self { blobs, gate }
+    }
+}
+
+impl ProtocolHandler for GatedBlobs {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        let mut res = Ok(());
+        self.gate.0.send_if_modified(|s| {
+            res = s.admit(&conn);
+            res.is_ok()
+        });
+        if let Err(why) = res {
+            say!(
+                "turned away {}: {}",
+                conn.remote_id().fmt_short(),
+                why.reason()
+            );
+            why.close(&conn);
+            return Ok(());
+        }
+        self.blobs.accept(conn).await
+    }
+
+    async fn shutdown(&self) {
+        self.blobs.shutdown().await;
+    }
+}
+
 /// Start the gate. In single-use mode, the receiver gets each root whose one
-/// download has finished.
+/// download has finished. `encrypted`: the collections have a manifest that
+/// clients may peek at.
 pub fn watcher(
     root: Hash,
     total: u64,
     single_use: bool,
+    encrypted: bool,
 ) -> (EventSender, Gate, mpsc::Receiver<Hash>) {
     let mask = EventMask {
-        connected: if single_use {
-            ConnectMode::Intercept
-        } else {
-            // Only to name clients on their progress bars.
-            ConnectMode::Notify
-        },
+        // GatedBlobs decides who may connect; this only names clients on
+        // their progress bars.
+        connected: ConnectMode::Notify,
         get: RequestMode::InterceptLog,
         get_many: RequestMode::Disabled,
         push: RequestMode::Disabled,
@@ -109,11 +248,15 @@ pub fn watcher(
     let (events, rx) = EventSender::channel(32, mask);
     let gate = Gate(watch::Sender::new(State {
         single_use,
+        encrypted,
         root: Some(root),
         total,
         active: HashMap::new(),
         conn: None,
         completed: None,
+        gone: Refusal::Unknown,
+        retired: HashMap::new(),
+        conns: HashMap::new(),
     }));
     let (done_tx, done_rx) = mpsc::channel(4);
     tokio::spawn(run(rx, gate.0.clone(), done_tx));
@@ -131,33 +274,14 @@ async fn run(
     let mut grace_root: Option<Hash> = None;
     // Short endpoint ids of connected clients, for progress bars.
     let mut clients: HashMap<u64, String> = HashMap::new();
+    // Connections that asked for file data, not just peeks.
+    let mut downloaders: HashSet<u64> = HashSet::new();
 
     loop {
         tokio::select! {
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
                 match msg {
-                    ProviderMessage::ClientConnected(msg) => {
-                        let mut ok = false;
-                        state.send_if_modified(|s| {
-                            ok = s.root.is_some() && s.conn.is_none() && s.completed.is_none();
-                            if ok {
-                                s.conn = Some(msg.connection_id);
-                            }
-                            ok
-                        });
-                        if ok {
-                            say!(
-                                "client connected: {}",
-                                msg.endpoint_id.map(|e| e.to_string()).unwrap_or_default()
-                            );
-                            if let Some(id) = msg.endpoint_id {
-                                clients.insert(msg.connection_id, id.fmt_short().to_string());
-                            }
-                        }
-                        let res = if ok { Ok(()) } else { Err(AbortReason::Permission) };
-                        msg.tx.send(res).await.ok();
-                    }
                     ProviderMessage::ClientConnectedNotify(msg) => {
                         if let Some(id) = msg.endpoint_id {
                             say!("client connected: {id}");
@@ -166,14 +290,20 @@ async fn run(
                     }
                     ProviderMessage::ConnectionClosed(msg) => {
                         clients.remove(&msg.connection_id);
+                        let downloaded = downloaders.remove(&msg.connection_id);
                         let mut finished = None;
                         state.send_if_modified(|s| {
+                            s.conns.remove(&msg.connection_id);
                             if s.conn != Some(msg.connection_id) {
                                 return false;
                             }
                             match s.completed {
                                 // Keep the slot taken: no more downloads of this root.
                                 Some(root) => finished = Some(root),
+                                None if !downloaded => {
+                                    say!("client disconnected after only looking at the file list");
+                                    s.conn = None;
+                                }
                                 None => {
                                     say!("client disconnected before finishing; waiting for another client");
                                     s.conn = None;
@@ -191,13 +321,15 @@ async fn run(
                     ProviderMessage::GetRequestReceived(msg) => {
                         let conn = msg.connection_id;
                         let hash = msg.request.hash;
-                        let probe = msg.request.ranges == size_probe();
+                        let mut probe = false;
                         let mut total = 0;
                         // Check and count in one step, so a reset can't slip in between.
                         let mut ok = false;
                         let mut single_use = false;
+                        let mut refused = None;
                         state.send_if_modified(|s| {
                             single_use = s.single_use;
+                            probe = is_peek(&msg.request.ranges, s.encrypted);
                             total = s.total;
                             ok = s.root == Some(hash)
                                 && (!s.single_use || (s.conn == Some(conn) && s.completed.is_none()));
@@ -205,6 +337,7 @@ async fn run(
                                 *s.active.entry(hash).or_default() += 1;
                                 return true;
                             }
+                            refused = s.conns.get(&conn).cloned().map(|c| (c, s.refusal(hash, conn)));
                             // Single use: a client asking for something else (say, an
                             // old ticket after a reset) must not keep the slot taken
                             // until its connection times out.
@@ -214,8 +347,17 @@ async fn run(
                             }
                             false
                         });
+                        // Close the connection with the reason first, so that is
+                        // what the client sees, not the bare "permission".
+                        if let Some((c, why)) = refused {
+                            say!("turned away {}: {}", c.remote_id().fmt_short(), why.reason());
+                            why.close(&c);
+                        }
                         let res = if ok { Ok(()) } else { Err(AbortReason::Permission) };
                         msg.tx.send(res).await.ok();
+                        if ok && !probe {
+                            downloaders.insert(conn);
+                        }
                         if ok {
                             let mut updates = msg.rx;
                             let state = state.clone();
@@ -232,7 +374,7 @@ async fn run(
                                     }
                                     match update {
                                         RequestUpdate::Completed(_) => {
-                                            // A size probe is not the download.
+                                            // A peek is not the download.
                                             if single_use && !probe {
                                                 completed_tx.send((conn, hash)).await.ok();
                                             }
@@ -365,5 +507,43 @@ impl Drop for SendProgress {
         {
             ui::fail_bar(bar, format!("transfer to {} ended", self.client));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peeks() {
+        assert!(is_peek(&size_probe(), false));
+        assert!(is_peek(&size_probe(), true));
+        assert!(is_peek(&names_probe(), false));
+        assert!(is_peek(&names_probe(), true));
+        assert!(is_peek(&ChunkRangesSeq::root(), false));
+        // The manifest only counts as metadata when the data is encrypted.
+        assert!(is_peek(&manifest_probe(), true));
+        assert!(!is_peek(&manifest_probe(), false));
+    }
+
+    #[test]
+    fn downloads_are_not_peeks() {
+        assert!(!is_peek(&ChunkRangesSeq::all(), false));
+        assert!(!is_peek(&ChunkRangesSeq::all(), true));
+        // Any file data, even part of one.
+        let second_file = ChunkRangesSeq::from_ranges([
+            ChunkRanges::all(),
+            ChunkRanges::empty(),
+            ChunkRanges::empty(),
+            ChunkRanges::all(),
+        ]);
+        assert!(!is_peek(&second_file, true));
+        let tail = ChunkRangesSeq::from_ranges_infinite([
+            ChunkRanges::empty(),
+            ChunkRanges::empty(),
+            ChunkRanges::all(),
+        ]);
+        assert!(!is_peek(&tail, false));
+        assert!(!is_peek(&tail, true));
     }
 }

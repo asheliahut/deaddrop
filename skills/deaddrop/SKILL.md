@@ -1,14 +1,14 @@
 ---
 name: deaddrop
-description: Use the deaddrop CLI to hand files from a server to another machine peer to peer. It downloads a torrent on a server without seeding it, serves the files over iroh (end-to-end encrypted QUIC), and fetches them on a client with a ticket. Use when the user mentions deaddrop, has a deaddrop ticket (a long string starting with "blob"), wants to get a torrent's files onto another machine without seeding, or wants to set up, reset or configure a deaddrop server (notifiers, age encryption, relays).
+description: Use the deaddrop CLI to hand files from a server to another machine peer to peer. It downloads a torrent on a server without seeding it (or takes local files, stdin or an http(s) download), serves the files over iroh (end-to-end encrypted QUIC), and fetches them on a client with a ticket. Use when the user mentions deaddrop, has a deaddrop ticket (a long string starting with "blob"), wants to get a torrent's files onto another machine without seeding, wants to send local files, piped output or a downloaded file to another machine, or wants to set up, reset or configure a deaddrop server (notifiers, age encryption, relays).
 metadata:
   generated-by: deaddrop
-  version: "2.0.0"
+  version: "2.1.0"
 ---
 
 # deaddrop
 
-deaddrop moves a torrent's files from a server to one client:
+deaddrop moves files from a server to one client (shown here with a torrent):
 
 1. On the server, `deaddrop serve <source>` downloads the torrent in
    leech-only mode (nothing is uploaded to the swarm), shuts the torrent
@@ -17,9 +17,14 @@ deaddrop moves a torrent's files from a server to one client:
    peer over iroh, downloads the files and checks every chunk against its
    BLAKE3 hash.
 
-`<source>` is a magnet URI, an http(s) URL of a `.torrent` file, or a path to
-a local `.torrent` file. Run `deaddrop --version` first: this skill is for
-deaddrop 2.0.0. Run `deaddrop <command> --help` for the full details of
+`<source>` is a magnet URI, a local `.torrent` file or http(s) URL ending in
+`.torrent` (downloaded as a torrent); one or more local files or directories
+(served in place, never changed or deleted); `-` for stdin (one file, named
+by `--name`); or any other http(s) URL, which the server downloads and serves
+as one file (`--name` sets its name; a response that is a `.torrent` file is
+downloaded as a torrent unless `--as-is`). `deaddrop reset` only takes
+torrents. Run `deaddrop --version` first: this skill is for
+deaddrop 2.1.0. Run `deaddrop <command> --help` for the full details of
 any command.
 
 Only transfer content the user has the right to download and share.
@@ -33,7 +38,12 @@ repeat them back unless the user asks:
 - **Decryption keys** (`AGE-SECRET-KEY-1...`): needed to read data served
   with `--encrypt`.
 - **Reset tokens**: let anyone with a ticket switch the server's torrent.
-- **Webhook URLs** (Discord or other): anyone with one can post there.
+- **Webhook URLs** (Discord, Slack, Mattermost, Rocket.Chat or other): anyone with one can post there.
+- **Telegram bot tokens**: anyone with one controls the bot.
+- **SMTP URLs** (`smtps://user:pass@...`): they hold the mail password.
+- **Twilio auth tokens**: anyone with one can send SMS on the account's bill.
+- **ntfy topic URLs and tokens**: on a public ntfy server, anyone who knows
+  the topic can read what is sent to it.
 
 Pass secrets through environment variables instead of flags, so they stay out
 of shell history and `ps`: `DEADDROP_KEY`, `DEADDROP_RESET_TOKEN`,
@@ -53,10 +63,23 @@ deaddrop serve 'magnet:?xt=urn:btih:...' > ticket.txt
   In scripts: `read -r TICKET KEY < ticket.txt`.
 - **Single use is the default:** the server exits after one client has
   downloaded everything. `--multi-use` keeps it serving until Ctrl-C.
-- `--data-dir <DIR>` keeps the data; without it a temporary dir is used and
-  deleted on exit.
+- `--data-dir <DIR>` keeps the data of a multi-use server after exit; without
+  it a temporary dir is used and deleted on exit. A single-use server deletes
+  the data once its one download is done, even from a data dir.
 - `--peer <IP:PORT>` (repeatable) adds BitTorrent peers when DHT and trackers
   can't find any.
+
+### Limiting who and how long
+
+- `--allow <ID>` (repeatable, `DEADDROP_ALLOW` comma-separated,
+  `serve.allow`) only lets those clients download or list. The client runs
+  `deaddrop id` and gives the printed id (64 hex characters, not secret) to
+  the server's operator. Anyone else is turned away, so a leaked ticket is
+  useless to them.
+- `--expire-after <DURATION>` (`30m`, `24h`, `7d`, `1h30m`; `serve.expire_after`)
+  makes each ticket stop working that long after it is printed, if not used
+  up first. Then the data is deleted and the server exits (or, with
+  `--wait-for-reset`, waits; each reset's ticket gets the full time again).
 
 ### Encryption
 
@@ -78,8 +101,26 @@ Send the ticket somewhere when it's ready:
 DEADDROP_NOTIFY='discord=https://discord.com/api/webhooks/<id>/<token>' deaddrop serve ...
 ```
 
-The types are `discord=<URL>` and `webhook=<URL>` (JSON POST). Add `+key`
-(`webhook+key=<URL>`) to also send the decryption key. The list is
+The types are `discord=<URL>`, `email=<SMTP URL>`, `slack=<URL>`, `mattermost=<URL>`,
+`rocketchat=<URL>` (incoming webhooks),
+`webhook=<URL>` (JSON POST) and `ntfy=<URL>`
+(a topic URL like `https://ntfy.sh/<topic>`; `user:pass@` in the URL or
+`token = "tk_..."` in the config for protected topics, optional
+`priority = 1..5`). Add `+key` (`webhook+key=<URL>`) to also send the
+decryption key; for ntfy only do that with a protected topic or a
+self-hosted server. Telegram is `telegram=<bot_token>@<chat_id>` (chat id a
+number or `@channelname`); in the config it is `bot_token`, `chat_id`, and
+optional `thread_id` and `api_url`. Twilio SMS is
+`twilio=<account_sid>:<auth_token>@<from>/<to>` (`from`: Twilio number, sender
+id or `MG...` Messaging Service; `to`: E.164 like `+15552223333`; one notifier
+per recipient); in the config it is `account_sid`, `auth_token`, `from`, `to`,
+and optional `api_key` (`SK...`) and `api_url`. SMS isn't end-to-end
+encrypted, so avoid `+key` on it. Email is
+`email=smtps://user:pass@host?from=a@x.org&to=b@y.org` (`smtps://` is TLS,
+`smtp://` requires STARTTLS, `?tls=none` only for a local relay; `to=`
+repeatable; percent-encode `@ : /` in credentials); in the config `from` and
+`to` (string or list) can be separate keys. Email isn't end-to-end encrypted
+either. The list is
 comma-separated. A failed notification is a warning; the server keeps
 serving.
 
@@ -104,13 +145,32 @@ deaddrop fetch "$TICKET" -o ./downloads
 DEADDROP_KEY="$KEY" deaddrop fetch "$TICKET" -o ./downloads   # data served with --encrypt
 ```
 
+- `deaddrop fetch --list "$TICKET"` prints the files and sizes (stdout, one
+  per line) without downloading. It doesn't use up a single-use download on a
+  2.1+ server, but an older server counts it as the download, so don't list
+  first against a server of unknown version. Encrypted names need the key.
 - `fetch` checks the size first, then downloads into
   `.deaddrop-<hash>/` inside the output dir, writes the files, and deletes the
   temp folder.
+- If the connection drops, `fetch` reconnects and resumes on its own for up to
+  `--retry-for` seconds (default 120) without progress. If it still fails,
+  the partial download is kept; **rerun the same command to resume**. Don't
+  delete `.deaddrop-<hash>/` unless the user wants to give up.
+- A 2.1+ server says why it turns a client away, and `fetch` prints it:
+  another client is downloading (it waits, then gives up after
+  `--retry-for`; rerun later), already downloaded, expired, replaced by a
+  reset, or not on the allow list. Only "another client is downloading" is
+  worth retrying; for the rest, the user needs a new ticket (or to be
+  allowed). A bare "permission" comes from a server older than 2.1.
 - If the data is encrypted and no key was given, it stops with an error but
   **keeps the download**. Rerunning with the key finishes without the server,
   even after a single-use server has exited.
 - A key passed for data that isn't encrypted is ignored, with a note.
+- "the server only accepts specific clients": the server uses `--allow`
+  and this client isn't on it. `fetch` stops at once (no retries). Run
+  `deaddrop id` (creates the identity on first use; `fetch` uses it from then
+  on) and have the server's operator add the printed id. Never copy another
+  machine's identity file to get around it.
 
 ## Output and exit codes
 
@@ -152,7 +212,7 @@ Follow these steps when the user asks to configure deaddrop:
      (`reset_token`), and should it `wait_for_reset`?
    - Server: is age encryption wanted (`encrypt`)? If so, should the key be
      printed or only sent to notifiers (`hide_key`)?
-   - Server: where should tickets go (Discord or webhook notifiers), and which
+   - Server: where should tickets go (Discord, Slack, Mattermost, Rocket.Chat, Telegram, ntfy, email, Twilio SMS or webhook notifiers), and which
      of them should get the key (`include_key`)?
    - Client: where should downloads go (`fetch.out`)?
    - Relays: n0's public relays (default), the user's own (`[relay] urls`),

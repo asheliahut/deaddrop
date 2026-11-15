@@ -4,6 +4,117 @@ All notable changes to deaddrop. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] - 2026-11-15
+
+### Changed
+
+- **A single-use server deletes the data when its download is done**, also
+  from a `--data-dir` and also without `--wait-for-reset`. Before, it only
+  shut down, and the files (plaintext, or the encrypted copies with
+  `--encrypt`) and blob store stayed in a `--data-dir`. A multi-use server
+  still keeps its data until a reset replaces it or, with a `--data-dir`,
+  after exit.
+- A reset that is still downloading when the server exits is deleted instead
+  of left half-done in the data dir.
+
+### Added
+
+- **Mattermost and Rocket.Chat notifiers.** `--notify mattermost=<URL>` and
+  `--notify rocketchat=<URL>` (or `type = "mattermost"` / `"rocketchat"` in
+  `[[serve.notify]]`) post the ticket to an incoming webhook, with the fetch
+  command in a code block. Names can't ping anyone: Mattermost gets escaped
+  Markdown with `@` mentions broken up, and Rocket.Chat shows the name as a
+  plain-text attachment title. `+key` / `include_key` adds the decryption key.
+- **Email notifier.** `--notify
+  'email=smtps://user:pass@smtp.example.com?from=me@x.org&to=you@y.org'` (or
+  `type = "email"` with `url`, `from` and `to` in `[[serve.notify]]`) emails
+  the ticket and fetch command over SMTP. `smtps://` uses TLS from the start
+  and `smtp://` requires STARTTLS; `?tls=none` is for local relays, and a
+  password is never sent without TLS except to localhost. `to` takes several
+  recipients. `+key` / `include_key` adds the decryption key, though email
+  isn't end-to-end encrypted.
+- **Slack notifier.** `--notify slack=<incoming webhook URL>` (or
+  `type = "slack"` in `[[serve.notify]]`) posts the ticket to a Slack
+  channel, with the fetch command in a code block and the expiry in each
+  reader's time zone. `+key` / `include_key` adds the decryption key.
+- **Twilio SMS notifier.** `--notify
+  twilio=<account_sid>:<auth_token>@<from>/<to>` (or `type = "twilio"` in
+  `[[serve.notify]]`) texts the ticket and fetch command to a phone number.
+  `from` can be a Twilio number, an alphanumeric sender id or a Messaging
+  Service; `api_key` logs in with a Twilio API key and `api_url` picks
+  another API host. `+key` / `include_key` adds the decryption key, though
+  SMS isn't end-to-end encrypted.
+- **Telegram notifier.** `--notify telegram=<bot_token>@<chat_id>` (or
+  `type = "telegram"` with `bot_token` and `chat_id` in `[[serve.notify]]`)
+  sends the ticket as a message from your bot, with the fetch command in a
+  copyable block. Optional `thread_id` posts in a forum topic and `api_url`
+  uses a self-hosted Bot API server. `+key` / `include_key` adds the
+  decryption key as a spoiler.
+- **ntfy notifier.** `--notify ntfy=https://ntfy.sh/<topic>` (or
+  `type = "ntfy"` in `[[serve.notify]]`) sends the ticket as a push
+  notification to an [ntfy](https://ntfy.sh) topic, on ntfy.sh or a
+  self-hosted server. Protected topics take `user:pass@` in the URL or a
+  `token`, and `priority` (1-5) is optional. `+key` / `include_key` adds the
+  decryption key to the message.
+- **`serve` can serve more than torrents.** `SOURCE` can now also be:
+  - **local files and directories** (one or more): served where they are,
+    never moved, changed or deleted, also with `--encrypt` and after a
+    single-use download. A directory keeps its name as the top folder;
+    symlinks inside it, special files and empty folders are skipped.
+  - **`-` for stdin**, saved as one file named by `--name` (default
+    `stdin`).
+  - **any http(s) URL**, which the server downloads and serves as one file
+    (named by `--name`, `Content-Disposition` or the URL). A response that is
+    a `.torrent` file (by `Content-Type` or its contents) is still downloaded
+    as a torrent, so tracker links without `.torrent` in the URL work as
+    before.
+
+  `--as-is` serves a `.torrent` file or URL as a plain file. Magnet URIs,
+  local `.torrent` files and URLs ending in `.torrent` work as before. Resets
+  still only take torrents, so a reset token can't make the server read its
+  own files or fetch arbitrary URLs.
+- **`serve --allow <ID>` lets only specific clients download.** A client
+  runs the new `deaddrop id` command once to create a persistent identity
+  and gives the printed id to the server's operator. Everyone else is turned
+  away right after the handshake, so a leaked ticket is useless to them, and
+  `fetch` stops at once with a clear message instead of retrying. Repeatable,
+  `DEADDROP_ALLOW` (comma-separated) or `serve.allow`. `fetch` uses the
+  identity once it exists (`--identity`, `DEADDROP_IDENTITY` or
+  `fetch.identity` pick another file); without one it still uses a new random
+  id each time.
+- **`serve --expire-after <DURATION>` makes tickets expire.** Each ticket
+  stops working that long after it is printed (`30m`, `24h`, `7d`, `1h30m`)
+  if it hasn't been used up. Then the data is deleted and the server exits,
+  or with `--wait-for-reset` waits for the next reset, whose ticket gets the
+  full time again. A download already running may finish. Also
+  `DEADDROP_EXPIRE_AFTER` and `serve.expire_after`. Notifications say when
+  the ticket expires: `expires_at` (Unix seconds) in webhook JSON, a
+  relative time in Discord.
+- **The server says why it turns a client away**, and `fetch` explains it
+  instead of a bare "permission" error: another client is downloading from
+  this single-use server, the drop was already downloaded, the ticket
+  expired or was replaced by a reset, or the client isn't on the allow
+  list. Only a busy slot is retried, quietly (one line, not one per
+  attempt); the others stop at once. A single-use server now refuses a
+  second client as soon as it connects. If the server disappears while a
+  client waits for a busy slot, `fetch` says the other download most likely
+  finished. The server logs every refusal, and `fetch` no longer leaves an
+  empty `.deaddrop-<hash>` folder behind, or keeps a partial download that
+  can never be finished.
+- **`fetch --list` shows what's in a drop without downloading it**: each
+  file's path and size on stdout, and a total. Only the names and sizes are
+  fetched, and the server doesn't count that as the single-use download, so
+  the real `fetch` still works afterwards. With `--encrypt` data the names
+  are shown only with the key. A server older than 2.1 does count a listing
+  as its one download.
+- **`fetch` resumes interrupted downloads.** If the connection drops, it
+  reconnects and downloads only what is missing, for up to `--retry-for`
+  seconds (`fetch.retry_for`, default 120) without progress. If it gives up
+  or is stopped, the partial download is kept in `.deaddrop-<hash>`, and
+  running the same command again picks up where it left off. Before, a
+  failed download was thrown away. A single-use server already let a client
+  that dropped out before finishing connect again.
+
 ## [2.0.0] - 2026-11-13
 
 ### Breaking
@@ -121,5 +232,6 @@ it, and hand it to one client peer to peer over iroh. Includes single-use and
 multi-use serving, resets with a reset token, `--wait-for-reset`, Discord and
 webhook notifiers, a TOML config file and shell completions.
 
+[2.1.0]: https://github.com/asheliahut/deaddrop/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/asheliahut/deaddrop/compare/v1.0.0...v2.0.0
 [1.0.0]: https://github.com/asheliahut/deaddrop/releases/tag/v1.0.0
