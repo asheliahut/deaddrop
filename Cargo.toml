@@ -17,7 +17,7 @@ clap_complete = "4.6.11"
 directories = "6"
 indicatif = "0.18.6"
 iroh = "1.4.1"
-iroh-blobs = "0.104.1"
+iroh-blobs = "0.105.0"
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "builder", "hostname", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }
 librqbit = { version = "9.1.0", default-features = false, features = ["rust-tls", "disable-upload"] }
 n0-future = "0.3"
